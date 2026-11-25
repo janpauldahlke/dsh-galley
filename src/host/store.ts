@@ -200,6 +200,21 @@ export class GalleyStore {
   private undoPath(id: string): string {
     return join(this.dir(id), 'undo.json')
   }
+  private redoPath(id: string): string {
+    return join(this.dir(id), 'redo.json')
+  }
+
+  private bumpRev(id: string, note: string): GalleyPacket {
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    packet.rev += 1
+    packet.updatedAt = new Date().toISOString()
+    this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
+    const journal = this.readJson<{ rev: number; at: string; note: string }[]>(this.journalPath(id), [])
+    journal.push({ rev: packet.rev, at: packet.updatedAt, note })
+    this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
+    return packet
+  }
 
   create(packet: GalleyPacket): GalleyPacket {
     const dir = this.dir(packet.id)
@@ -320,17 +335,18 @@ export class GalleyStore {
     journal.push({ rev: packet.rev, at: packet.updatedAt, note: touchedId ? `edit ${touchedId}` : 'edit' })
     this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
 
-    // Undo ring: push previous snapshot, keep last UNDO_DEPTH.
+    // Undo ring: push previous snapshot, keep last UNDO_DEPTH. Forward mutation clears redo.
     const undo = this.readJson<GalleyPacket[]>(this.undoPath(id), [])
     undo.push(prevSnapshot)
     while (undo.length > UNDO_DEPTH) undo.shift()
     this.atomicWrite(this.undoPath(id), JSON.stringify(undo))
+    this.atomicWrite(this.redoPath(id), '[]')
 
     this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
     return { packet, rev: packet.rev, changeHash }
   }
 
-  /** Pop the last snapshot and restore it (rev is preserved, no bump). */
+  /** Pop the last snapshot and restore it; rev strictly increases (+1, spec 01 §1). */
   undo(id: string): { packet: GalleyPacket; rev: number } {
     const packet = this.load(id)
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
@@ -338,6 +354,13 @@ export class GalleyStore {
     if (undo.length === 0) throw new StoreError('no_undo', `no undo history for ${id}`)
     const prev = undo.pop()!
     this.atomicWrite(this.undoPath(id), JSON.stringify(undo))
+
+    const redo = this.readJson<GalleyPacket[]>(this.redoPath(id), [])
+    redo.push(JSON.parse(JSON.stringify(packet)) as GalleyPacket)
+    while (redo.length > UNDO_DEPTH) redo.shift()
+    this.atomicWrite(this.redoPath(id), JSON.stringify(redo))
+
+    prev.rev = packet.rev + 1
     prev.updatedAt = new Date().toISOString()
     recomputeStale(prev)
     this.atomicWrite(this.packetPath(id), JSON.stringify(prev, null, 2))
@@ -347,31 +370,58 @@ export class GalleyStore {
     return { packet: prev, rev: prev.rev }
   }
 
+  /** Re-apply the most recently undone snapshot; rev strictly increases (+1). */
+  redo(id: string): { packet: GalleyPacket; rev: number } {
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    const redo = this.readJson<GalleyPacket[]>(this.redoPath(id), [])
+    if (redo.length === 0) throw new StoreError('no_redo', `no redo history for ${id}`)
+    const next = redo.pop()!
+    this.atomicWrite(this.redoPath(id), JSON.stringify(redo))
+
+    const undo = this.readJson<GalleyPacket[]>(this.undoPath(id), [])
+    undo.push(JSON.parse(JSON.stringify(packet)) as GalleyPacket)
+    while (undo.length > UNDO_DEPTH) undo.shift()
+    this.atomicWrite(this.undoPath(id), JSON.stringify(undo))
+
+    next.rev = packet.rev + 1
+    next.updatedAt = new Date().toISOString()
+    recomputeStale(next)
+    this.atomicWrite(this.packetPath(id), JSON.stringify(next, null, 2))
+    const journal = this.readJson<{ rev: number; at: string; note: string }[]>(this.journalPath(id), [])
+    journal.push({ rev: next.rev, at: next.updatedAt, note: 'redo' })
+    this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
+    return { packet: next, rev: next.rev }
+  }
+
   undoDepth(id: string): number {
     return this.readJson<GalleyPacket[]>(this.undoPath(id), []).length
   }
 
-  // ── proposals + annotations (stored inside the packet file) ──────────────
+  redoDepth(id: string): number {
+    return this.readJson<GalleyPacket[]>(this.redoPath(id), []).length
+  }
+
+  // ── proposals + annotations (bump packet.rev so rev-polling observes deltas) ──
 
   addProposal(id: string, proposal: GalleyProposal): GalleyProposal {
     const packet = this.load(id)
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
-    ;(packet as unknown as Record<string, unknown>)._proposals = [
-      ...this.readJson<GalleyProposal[]>(join(this.dir(id), 'proposals.json'), []),
-      proposal,
-    ]
-    this.atomicWrite(join(this.dir(id), 'proposals.json'), JSON.stringify((packet as unknown as Record<string, unknown>)._proposals))
+    const next = [...this.readJson<GalleyProposal[]>(join(this.dir(id), 'proposals.json'), []), proposal]
+    this.atomicWrite(join(this.dir(id), 'proposals.json'), JSON.stringify(next))
+    this.bumpRev(id, `proposal ${proposal.id}`)
     return proposal
   }
   listProposals(id: string): GalleyProposal[] {
     return this.readJson<GalleyProposal[]>(join(this.dir(id), 'proposals.json'), [])
   }
-  setProposalStatus(id: string, proposalId: string, status: GalleyProposal['status']): GalleyProposal | null {
+  setProposalStatus(id: string, proposalId: string, status: GalleyProposal['status'], opts?: { bumpRev?: boolean }): GalleyProposal | null {
     const list = this.listProposals(id)
     const p = list.find((x) => x.id === proposalId)
     if (!p) return null
     p.status = status
     this.atomicWrite(join(this.dir(id), 'proposals.json'), JSON.stringify(list))
+    if (opts?.bumpRev !== false) this.bumpRev(id, `proposal ${proposalId} ${status}`)
     return p
   }
   /**
@@ -410,13 +460,15 @@ export class GalleyStore {
         return proposal.targetBlockId
       },
     )
-    const updated = this.setProposalStatus(id, proposalId, 'accepted')!
+    // commit() above already bumped packet.rev; record status without double-bumping.
+    const updated = this.setProposalStatus(id, proposalId, 'accepted', { bumpRev: false })!
     return updated
   }
   addAnnotation(id: string, annotation: GalleyAnnotation): GalleyAnnotation {
     const list = this.readJson<GalleyAnnotation[]>(join(this.dir(id), 'annotations.json'), [])
     list.push(annotation)
     this.atomicWrite(join(this.dir(id), 'annotations.json'), JSON.stringify(list))
+    this.bumpRev(id, `annotation ${annotation.id}`)
     return annotation
   }
   listAnnotations(id: string, blockId?: BlockId): GalleyAnnotation[] {
@@ -429,20 +481,29 @@ export class GalleyStore {
     if (!a) return null
     a.resolved = resolved
     this.atomicWrite(join(this.dir(id), 'annotations.json'), JSON.stringify(list))
+    this.bumpRev(id, `annotation ${annotationId} ${resolved ? 'resolved' : 'unresolved'}`)
     return a
   }
 
   // ── assets (metadata in packet; bytes in assets/ dir) ─────────────────────
 
-  addAsset(id: string, meta: AssetMeta, bytes: Buffer): AssetMeta {
-    const packet = this.load(id)!
-    if (Object.keys(packet.assets ?? {}).length >= MAX_ASSETS_PER_PACKET) {
+  addAsset(id: string, meta: AssetMeta, bytes: Buffer, opts?: { bumpRev?: boolean }): AssetMeta {
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    const existing = packet.assets ?? {}
+    if (!(meta.id in existing) && Object.keys(existing).length >= MAX_ASSETS_PER_PACKET) {
       throw new StoreError('asset_limit', `packet ${id} already holds ${MAX_ASSETS_PER_PACKET} assets`)
     }
     const assetsDir = join(this.dir(id), 'assets')
     mkdirSync(assetsDir, { recursive: true })
     writeFileSync(join(assetsDir, basename(meta.path)), bytes)
-    packet.assets = { ...(packet.assets ?? {}), [meta.id]: meta }
+    packet.assets = { ...existing, [meta.id]: meta }
+    const mSeq = meta.id.match(/^a(\d+)$/)
+    if (mSeq) packet.nextAssetSeq = Math.max(packet.nextAssetSeq ?? 1, Number(mSeq[1]) + 1)
+    if (opts?.bumpRev !== false) {
+      packet.rev += 1
+      packet.updatedAt = new Date().toISOString()
+    }
     this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
     return meta
   }

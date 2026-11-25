@@ -579,6 +579,109 @@ export function parseSvgPages(svg: string): {
   return { pageCount, linesPerPage, anchors }
 }
 
+function scopeTypstCss(svgFragment: string): string {
+  return svgFragment.replace(/<style[^>]*>([\s\S]*?)<\/style>/g, (_full, css: string) => {
+    const scoped = css
+      .replace(/(^|\}|\s)svg\s*\{/g, '$1svg.typst-doc {')
+      .replace(/\.tsel\s+span,\s*\.tsel\s*\{[^}]*\}/g, '.tsel, .tsel span { display: none !important; }')
+    return `<style type="text/css">${scoped}</style>`
+  })
+}
+
+function namespaceSvgIds(svgFragment: string, prefix: string): string {
+  const ids = new Set<string>()
+  const idRe = /\bid="([^"]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = idRe.exec(svgFragment)) !== null) ids.add(m[1])
+  if (ids.size === 0) return svgFragment
+  return svgFragment
+    .replace(/\bid="([^"]+)"/g, (full, id: string) => (ids.has(id) ? `id="${prefix}${id}"` : full))
+    .replace(/\b(xlink:href|href)="#([^"]+)"/g, (full, attr: string, id: string) =>
+      ids.has(id) ? `${attr}="#${prefix}${id}"` : full,
+    )
+    .replace(/url\(#([^)]+)\)/g, (full, id: string) => (ids.has(id) ? `url(#${prefix}${id})` : full))
+}
+
+function filterPageGlyphDefs(preamble: string, pageBody: string): string {
+  const used = new Set<string>()
+  const refRe = /\b(?:xlink:href|href)="#([^"]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = refRe.exec(pageBody)) !== null) used.add(m[1])
+  return preamble.replace(/<defs class="glyph">([\s\S]*?)<\/defs>/g, (_full, inner: string) => {
+    const filtered = inner.replace(/<path\b[^>]*\bid="([^"]+)"[^>]*\/>/g, (tag, id: string) =>
+      used.has(id) ? tag : '',
+    )
+    return `<defs class="glyph">${filtered}</defs>`
+  })
+}
+
+/**
+ * Split a stacked multi-page Typst SVG into standalone, DOM-isolated per-page
+ * `<svg class="typst-doc">` strings (spec 04 §3). Scopes embedded `<style>`
+ * rules so inline SVGs cannot bleed onto host chrome icons, resets each page's
+ * outer `translate(0, y)` to `(0, 0)`, filters unused glyph defs per page, and
+ * namespaces internal `<defs>` IDs to prevent cross-page DOM collisions.
+ */
+export function splitSvgPages(
+  svg: string,
+  pageCount: number,
+  perPageDims: { wPt: number; hPt: number }[],
+  scopePrefix = 'galley',
+): string[] {
+  const count = Math.max(1, pageCount)
+  const fallbackDim = perPageDims[0] ?? { wPt: 595.28, hPt: 841.89 }
+  const blankPage = (idx: number): string => {
+    const dim = perPageDims[idx] ?? fallbackDim
+    return `<svg xmlns="http://www.w3.org/2000/svg" class="typst-doc" viewBox="0 0 ${dim.wPt} ${dim.hPt}" width="100%" style="display:block;width:100%;height:auto;background:#ffffff;color:#000000;"></svg>`
+  }
+
+  const openEnd = svg.indexOf('>')
+  const closeStart = svg.lastIndexOf('</svg>')
+  if (openEnd < 0 || closeStart <= openEnd) {
+    return Array.from({ length: count }, (_, i) => blankPage(i))
+  }
+
+  const pageStarts: number[] = []
+  const pageRe = /<g class="typst-page"/g
+  let pm: RegExpExecArray | null
+  while ((pm = pageRe.exec(svg)) !== null) pageStarts.push(pm.index)
+
+  if (pageStarts.length === 0) {
+    const dim = perPageDims[0] ?? fallbackDim
+    const inner = scopeTypstCss(svg.slice(openEnd + 1, closeStart))
+    const wrapped = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:h5="http://www.w3.org/1999/xhtml" class="typst-doc" viewBox="0 0 ${dim.wPt} ${dim.hPt}" width="100%" style="display:block;width:100%;height:auto;background:#ffffff;color:#000000;">${inner}</svg>`
+    const first = namespaceSvgIds(wrapped, `${scopePrefix}_p0_`)
+    const out = [first]
+    for (let i = 1; i < count; i++) out.push(blankPage(i))
+    return out
+  }
+
+  const preamble = scopeTypstCss(svg.slice(openEnd + 1, pageStarts[0]))
+  const out: string[] = []
+  for (let i = 0; i < count; i++) {
+    if (i >= pageStarts.length) {
+      out.push(blankPage(i))
+      continue
+    }
+    const start = pageStarts[i]
+    const end = i + 1 < pageStarts.length ? pageStarts[i + 1] : closeStart
+    const rawPage = svg
+      .slice(start, end)
+      .replace(/^<g class="typst-page"([^>]*?)\btransform="translate\([^"]*\)"/, '<g class="typst-page"$1transform="translate(0, 0)"')
+    const dim = perPageDims[i] ?? fallbackDim
+    // Honour Typst's integer-rounded data-page-width/height if present so viewBox matches glyph coordinates.
+    const mw = rawPage.match(/\bdata-page-width="([\d.]+)"/)
+    const mh = rawPage.match(/\bdata-page-height="([\d.]+)"/)
+    const vw = mw ? Number(mw[1]) : dim.wPt
+    const vh = mh ? Number(mh[1]) : dim.hPt
+    const pageDefs = filterPageGlyphDefs(preamble, rawPage)
+    const assembled = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:h5="http://www.w3.org/1999/xhtml" class="typst-doc" viewBox="0 0 ${vw} ${vh}" width="100%" style="display:block;width:100%;height:auto;background:#ffffff;color:#000000;">${pageDefs}${rawPage}</svg>`
+    const safePrefix = scopePrefix.replace(/[^A-Za-z0-9_-]/g, '_')
+    out.push(namespaceSvgIds(assembled, `${safePrefix}_p${i}_`))
+  }
+  return out
+}
+
 export interface Receipt {
   pages: number
   perPage: number[]

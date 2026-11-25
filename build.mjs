@@ -19,5 +19,7 @@ await buildDshPlugin({
     // HERMETIC M1 core (store + six tools + ast); node: builtins only — the
     // render arm is injected, so `node --test` runs it without dsh or the arms.
     { entry: 'src/host/tools.ts', out: 'galley-core.mjs' },
+    // Pure client pane state/protocol helpers for hermetic `node --test`.
+    { entry: 'src/client/paneModel.ts', out: 'galley-pane.mjs' },
   ],
 })

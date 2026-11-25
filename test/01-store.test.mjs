@@ -221,17 +221,30 @@ test('cycle detection + allocateBlockId never reuses retired ids', () => {
   assert.equal(allocateBlockId(packet), 'b3')
 })
 
-test('undo ring capped at UNDO_DEPTH (50) + undo restores', () => {
-  const pid = store.create(mkPacket([mkBlock('b1')])).id
+test('undo ring capped at UNDO_DEPTH (50) + undo/redo advance rev monotonically', () => {
+  const pid = store.create(mkPacket([mkBlock('b1', 'prose', { body: [T('v0')] })])).id
   assert.equal(UNDO_DEPTH, 50)
-  for (let i = 0; i < 55; i++) store.commit(pid, null, () => null)
+  for (let i = 0; i < 55; i++) {
+    store.commit(pid, null, (p) => {
+      p.sheets.s1.blocks[0].body = [T(`v${i + 1}`)]
+      return 'b1'
+    })
+  }
   assert.equal(store.load(pid).rev, 56)
   assert.equal(store.undoDepth(pid), UNDO_DEPTH)
   const beforeUndo = store.load(pid).rev
   store.undo(pid)
   const after = store.load(pid)
-  assert.equal(after.rev, beforeUndo - 1)
+  // Spec 01 §1: rev strictly increases (+1) on every committed change, including undo/redo.
+  assert.equal(after.rev, beforeUndo + 1)
+  assert.equal(after.sheets.s1.blocks[0].body[0].v, 'v54')
   assert.equal(store.undoDepth(pid), UNDO_DEPTH - 1)
+  assert.equal(store.redoDepth(pid), 1)
+
+  const redone = store.redo(pid)
+  assert.equal(redone.rev, beforeUndo + 2)
+  assert.equal(store.load(pid).sheets.s1.blocks[0].body[0].v, 'v55')
+  assert.equal(store.redoDepth(pid), 0)
 })
 
 test('journal keeps last JOURNAL_KEEP (3)', () => {

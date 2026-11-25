@@ -33,7 +33,29 @@ import {
   allocateBlockId,
   hashBlock,
 } from './store.ts'
-import { compileSheet } from '../typst/index.ts'
+import { compileSheet, splitSvgPages } from '../typst/index.ts'
+import { serializeInlines, parseInlines } from '../shared/inlineMarkup.ts'
+import { createGalleyHttpDispatcher, httpStatusForCode } from './httpDispatch.ts'
+import {
+  getStoreForCwd,
+  noteGalleyCwd,
+  resolveGalleyCwd,
+  resolveGalleyRoot,
+  _resetGalleyWorkspaceForTests,
+} from './workspace.ts'
+
+export {
+  splitSvgPages,
+  serializeInlines,
+  parseInlines,
+  createGalleyHttpDispatcher,
+  httpStatusForCode,
+  getStoreForCwd,
+  noteGalleyCwd,
+  resolveGalleyCwd,
+  resolveGalleyRoot,
+  _resetGalleyWorkspaceForTests,
+}
 
 // Re-export the store's public API so a single built artifact (`galley-core.mjs`)
 // serves both the six tools and the hermetic store tests.
@@ -99,7 +121,8 @@ function toStoreCode(code: string): string {
   switch (code) {
     case 'conflict': return Err.PROPOSAL_CONFLICT
     case 'cycle': return Err.DEPENDENCY_CYCLE
-    case 'no_undo': return Err.INVALID_PARAMS
+    case 'no_undo':
+    case 'no_redo': return Err.INVALID_PARAMS
     case 'asset_limit': return Err.ASSET_LIMIT_EXCEEDED
     case 'asset_not_found': return Err.ASSET_NOT_FOUND
     case 'proposal_not_found': return Err.PROPOSAL_NOT_FOUND
@@ -513,6 +536,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
         id,
         { id: a.id, path: a.path, bytesSha256: createHash('sha256').update(bytes).digest('hex'), mimeType: a.mimeType },
         bytes,
+        { bumpRev: false },
       )
     }
     const loaded = store.load(id)!
@@ -672,10 +696,10 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
     const prePatchOrigin =
       args.op === 'patch' ? findBlock(packet, args.blockId!)?.block?.origin : undefined
 
-    // Proposal rule (spec 01 §7 / 02 §4.4): a patch on a HUMAN-origin block is a
-    // proposal, NOT a direct write — the block stays untouched until the human
-    // accepts or reverts. Verify baseHash, record the proposal, applied:false.
-    if (args.op === 'patch' && prePatchOrigin === 'human') {
+    // Proposal rule (spec 01 §7 / 02 §4.4): an AGENT patch on a HUMAN-origin block
+    // stages a proposal (applied:false) — the block stays untouched until the human
+    // accepts or reverts. Direct human edits from the pane apply immediately.
+    if (args.op === 'patch' && args.origin === 'agent' && prePatchOrigin === 'human') {
       const target = findBlock(packet, args.blockId!)
       if (!target) return fail(Err.BLOCK_NOT_FOUND, `block ${args.blockId} not found`)
       if (args.baseHash && args.baseHash !== target.block.hash) {
@@ -684,12 +708,19 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
         t.currentHash = target.block.hash
         return t
       }
+      const proposedPatch = args.patch ?? {}
+      const beforePatch: Record<string, unknown> = {}
+      const rawBlock = target.block as unknown as Record<string, unknown>
+      for (const k of Object.keys(proposedPatch)) {
+        if (k in rawBlock) beforePatch[k] = JSON.parse(JSON.stringify(rawBlock[k]))
+      }
       const seq = store.listProposals(pid).length + 1
       const prop: GalleyProposal = {
         id: `prop-${seq}`,
         targetBlockId: args.blockId!,
         baseHash: target.block.hash,
-        proposedPatch: args.patch ?? {},
+        beforePatch,
+        proposedPatch,
         status: 'pending',
         createdAtRev: packet.rev,
       }

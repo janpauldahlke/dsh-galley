@@ -8,6 +8,10 @@
 export const PLUGIN = 'dsh-galley'
 export const VERSION = '0.1.0'
 export const HEALTH_ROUTE = '/api/galley/health'
+export const STATE_ROUTE = '/api/galley/state'
+export const EDIT_ROUTE = '/api/galley/edit'
+export const EXPORT_ROUTE = '/api/galley/export'
+export const PROPOSAL_ROUTE_PREFIX = '/api/galley/proposal'
 
 export const TAB_ID = 'galley'
 export const TAB_KIND = 'galley'
@@ -232,11 +236,12 @@ export interface RenderDiagnostic {
   col?: number
 }
 
-export type ProposalStatus = 'pending' | 'accepted' | 'rejected'
+export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'conflicted'
 export interface GalleyProposal {
   id: string
   targetBlockId: BlockId
   baseHash: string
+  beforePatch?: Record<string, unknown>
   proposedPatch: Record<string, unknown>
   status: ProposalStatus
   createdAtRev: number
@@ -249,4 +254,76 @@ export interface GalleyAnnotation {
   body: Inline[]
   resolved: boolean
   createdAtRev: number
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Spec 02 §5 & Spec 04 — HTTP pane state & route contracts
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface PacketSummaryInfo {
+  id: PacketId
+  title: string
+  rev: number
+  updatedAt: string
+}
+
+export interface StateSheetView {
+  id: SheetId
+  title: string
+  geometry: PageGeometry
+  blocks: Block[]
+  annotations: GalleyAnnotation[]
+  proposals: GalleyProposal[]
+}
+
+export interface StateProofView {
+  sheetId: SheetId
+  pages: number
+  perPage: { wPt: number; hPt: number }[]
+  lastPageLineCount: number
+  overflowLinesOnLastPage: number
+  blockToPage: Record<BlockId, number>
+  compiledAtRev: number
+  /** Per-page SVG data URIs (`data:image/svg+xml;base64,…`), isolated for inline DOM mount. */
+  svgPages: string[]
+  compileError?: { message: string; blockId: BlockId | null } | null
+}
+
+export interface StateActivePayload {
+  ok: true
+  activePacket: true
+  cwd: string
+  packets: PacketSummaryInfo[]
+  rev: number
+  packetId: PacketId
+  template: GalleyPacket['template']
+  title: string
+  activeSheetId: SheetId
+  sheetOrder: SheetId[]
+  assets: Record<AssetId, AssetMeta>
+  undoDepth: number
+  redoDepth: number
+  sheets: StateSheetView[]
+  staleDependents: { id: BlockId; origin: BlockId; sinceHash: string; state: StaleInfo['state'] }[]
+  proofs: StateProofView[]
+}
+
+export interface StateEmptyPayload {
+  ok: true
+  activePacket: false
+  cwd: string
+  packets: PacketSummaryInfo[]
+  rev: 0
+  packetId: null
+}
+
+export type StateResponsePayload = StateActivePayload | StateEmptyPayload
+
+export interface ExportFileReceipt {
+  sheetId: SheetId
+  path: string
+  format: string
+  pages: number | null
+  sizeBytes: number
+  sha256: string
 }

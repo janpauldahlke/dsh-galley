@@ -12,15 +12,23 @@
  * Routes:
  * - GET /api/galley/health — liveness { ok, name, version, arm, typst }.
  */
-import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { PLUGIN, VERSION, HEALTH_ROUTE } from '../shared/types.ts'
+import {
+  PLUGIN,
+  VERSION,
+  HEALTH_ROUTE,
+  STATE_ROUTE,
+  EDIT_ROUTE,
+  EXPORT_ROUTE,
+  PROPOSAL_ROUTE_PREFIX,
+} from '../shared/types.ts'
 import type { GalleyPacket, GalleySheet } from '../shared/types.ts'
 import { renderTypstSource, type GalleyBlock } from '../typst/index.ts'
-import { GalleyStore } from './store.ts'
 import { createPrimaryArm, type Arm } from './arms/index.ts'
+import { registerGalleyRoutes } from './routes.ts'
+import { getStoreForCwd, resolveGalleyCwd } from './workspace.ts'
 import {
   galleyOpen,
   galleyStatus,
@@ -33,7 +41,15 @@ import {
 
 export const name = PLUGIN
 export const inject = ['tools']
-export { HEALTH_ROUTE, PLUGIN, VERSION }
+export {
+  HEALTH_ROUTE,
+  STATE_ROUTE,
+  EDIT_ROUTE,
+  EXPORT_ROUTE,
+  PROPOSAL_ROUTE_PREFIX,
+  PLUGIN,
+  VERSION,
+}
 // Arms are re-exported so the in-process gate test (test/05) and the health
 // probe can drive the real render pipeline; `@myriaddreamin/*` stays external
 // (the native .node binary is loaded lazily by NativeArm.init).
@@ -124,10 +140,14 @@ function renderJson(value: unknown): Array<{ type: 'text'; text: string }> {
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
 }
 
-// ── M1 wiring: one store + one primary arm per plugin load ──────────────────
+// ── Workspace-scoped store + primary arm ────────────────────────────────────
 
-function getStore(): GalleyStore {
-  return new GalleyStore(process.env.GALLEY_ROOT ?? join(process.cwd(), '.dsh', 'galley'))
+type ExecLike = {
+  agent?: {
+    session?: {
+      header?: { cwd?: string }
+    }
+  }
 }
 
 let armPromise: Promise<Arm> | null = null
@@ -135,13 +155,31 @@ function getArm(): Promise<Arm> {
   if (!armPromise) armPromise = createPrimaryArm().then((r) => r.arm)
   return armPromise
 }
-async function getDeps(): Promise<GalleyToolsDeps> {
+
+async function getDepsForCwd(cwdParam?: string | null): Promise<{
+  deps: GalleyToolsDeps
+  root: string
+  cwd: string
+}> {
   const arm = await getArm()
+  const { store, root, cwd } = getStoreForCwd(cwdParam)
   return {
-    store: getStore(),
-    render: (sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>) =>
-      arm.render(sheet, packet, assetBytes),
+    root,
+    cwd,
+    deps: {
+      store,
+      render: (sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>) =>
+        arm.render(sheet, packet, assetBytes),
+    },
   }
+}
+
+async function getToolDeps(args: Record<string, unknown>, exec?: ExecLike): Promise<GalleyToolsDeps> {
+  const explicitCwd = typeof args.cwd === 'string' ? args.cwd : undefined
+  const sessionCwd = exec?.agent?.session?.header?.cwd
+  const resolved = resolveGalleyCwd(explicitCwd, sessionCwd)
+  const { deps } = await getDepsForCwd(resolved)
+  return deps
 }
 
 /** Register the six M1 tools (tools face). */
@@ -169,6 +207,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       type: 'object',
       additionalProperties: false,
       properties: {
+        cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         id: { type: 'string', description: 'Switch active packet to an existing packetId (exclusive with create fields).' },
         template: { type: 'string', enum: ['arbeitsblatt', 'rfc', 'generic'] },
         title: { type: 'string' },
@@ -199,10 +238,10 @@ export function registerGalleyTools(ctx: Context): () => void {
       ok: { type: 'boolean' }, packetId: { type: 'string' }, rev: { type: 'integer' },
       blocks: { type: 'object' }, proofs: { type: 'object' },
     }),
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
         const a = args.id !== undefined ? args : { ...args, origin: 'agent' }
-        return await galleyOpen(await getDeps(), (a as unknown as Parameters<typeof galleyOpen>[1]))
+        return await galleyOpen(await getToolDeps(args, exec), (a as unknown as Parameters<typeof galleyOpen>[1]))
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -218,6 +257,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       type: 'object',
       additionalProperties: false,
       properties: {
+        cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         sheetId: { type: 'string' },
       },
@@ -226,9 +266,10 @@ export function registerGalleyTools(ctx: Context): () => void {
       ok: { type: 'boolean' }, packetId: { type: 'string' }, rev: { type: 'integer' },
       blocks: { type: 'object' }, proofs: { type: 'object' },
     }),
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        return await galleyStatus(await getDeps(), (args as unknown as Parameters<typeof galleyStatus>[1]))      } catch (error) {
+        return await galleyStatus(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyStatus>[1]))
+      } catch (error) {
         return toolErrorResult(error)
       }
     },
@@ -243,15 +284,17 @@ export function registerGalleyTools(ctx: Context): () => void {
       type: 'object',
       additionalProperties: false,
       properties: {
+        cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         blockId: { type: 'string' },
         blockIds: { type: 'array', items: { type: 'string' }, description: 'Batch: several block ids at once.' },
       },
     },
     output: out({ ok: { type: 'boolean' }, packetId: { type: 'string' }, blocks: { type: 'array' } }),
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        return await galleyReadBlock(await getDeps(), (args as unknown as Parameters<typeof galleyReadBlock>[1]))      } catch (error) {
+        return await galleyReadBlock(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyReadBlock>[1]))
+      } catch (error) {
         return toolErrorResult(error)
       }
     },
@@ -266,6 +309,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       type: 'object',
       additionalProperties: false,
       properties: {
+        cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         sheetId: { type: 'string' },
         op: { type: 'string', enum: ['insert', 'patch', 'move', 'remove'] },
@@ -287,12 +331,11 @@ export function registerGalleyTools(ctx: Context): () => void {
       proof: { type: ['object', 'null'] },
       staleDependents: { type: 'array' },
     }),
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        // M1.5 H5: the LLM always edits as 'agent'; human-origin blocks are
-        // written only by the pane (tools face), which passes origin itself.
         const a = { ...(args as Record<string, unknown>), origin: 'agent' }
-        return await galleyEditBlock(await getDeps(), (a as unknown as Parameters<typeof galleyEditBlock>[1]))      } catch (error) {
+        return await galleyEditBlock(await getToolDeps(args, exec), (a as unknown as Parameters<typeof galleyEditBlock>[1]))
+      } catch (error) {
         return toolErrorResult(error)
       }
     },
@@ -305,6 +348,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       type: 'object',
       additionalProperties: false,
       properties: {
+        cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         blockId: { type: 'string' },
         action: { type: 'string', enum: ['add', 'list', 'resolve', 'unresolve'] },
@@ -314,10 +358,10 @@ export function registerGalleyTools(ctx: Context): () => void {
       required: ['blockId', 'action'],
     },
     output: out({ ok: { type: 'boolean' }, annotations: { type: 'array' } }),
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
         const a = { ...args, author: 'agent' }
-        return await galleyAnnotate(await getDeps(), (a as unknown as Parameters<typeof galleyAnnotate>[1]))
+        return await galleyAnnotate(await getToolDeps(args, exec), (a as unknown as Parameters<typeof galleyAnnotate>[1]))
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -333,6 +377,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       type: 'object',
       additionalProperties: false,
       properties: {
+        cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         format: { type: 'string', enum: ['typ', 'md', 'tex', 'pdf', 'docx'] },
         sheetId: { type: 'string' },
@@ -340,9 +385,10 @@ export function registerGalleyTools(ctx: Context): () => void {
       required: ['format'],
     },
     output: out({ ok: { type: 'boolean' }, format: { type: 'string' } }),
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        return await galleyExport(await getDeps(), (args as unknown as Parameters<typeof galleyExport>[1]))      } catch (error) {
+        return await galleyExport(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyExport>[1]))
+      } catch (error) {
         return toolErrorResult(error)
       }
     },
@@ -396,6 +442,7 @@ export function apply(ctx: Context): void {
   ctx.inject(['webServer'], (webCtx: Context) => {
     try {
       registerHealthRoute(webCtx)
+      registerGalleyRoutes(webCtx, { getDepsForCwd })
     } catch (error) {
       webCtx.logger?.(PLUGIN)?.error?.('route registration failed: %s', errorMessage(error))
     }

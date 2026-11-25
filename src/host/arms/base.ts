@@ -4,7 +4,7 @@
  * → SheetRender. Each arm only supplies `compileTyp`.
  */
 import type { GalleySheet, GalleyPacket, SheetRender, RenderDiagnostic, AssetMeta } from '../../shared/types.ts'
-import { compileSheet, deriveReceipt, mapDiagnosticsToBlocks } from '../../typst/index.ts'
+import { compileSheet, deriveReceipt, mapDiagnosticsToBlocks, splitSvgPages } from '../../typst/index.ts'
 import type { Arm, CompiledTyp, ShadowFile } from './types.ts'
 import { ArmError } from './types.ts'
 
@@ -51,13 +51,15 @@ export abstract class BaseArm implements Arm {
     }
     const receipt = deriveReceipt(out.svg, out.pages, cs.pageHeightPt, cs.targetPages, cs.anchors)
     const diagnostics: RenderDiagnostic[] = mapDiagnosticsToBlocks(cs.typ, out.diags ?? [])
+    const perPage = Array.from({ length: out.pages }, () => ({ wPt: cs.pageWidthPt, hPt: cs.pageHeightPt }))
+    const pageSvgs = splitSvgPages(out.svg, out.pages, perPage, `${packet.id}_${sheet.id}_r${packet.rev}`)
     return {
       sheetId: sheet.id,
       pdf: out.pdf,
-      svgPages: [Buffer.from(out.svg, 'utf8')],
+      svgPages: pageSvgs.map((s) => Buffer.from(s, 'utf8')),
       svg: out.svg,
       pages: out.pages,
-      perPage: Array.from({ length: out.pages }, () => ({ wPt: cs.pageWidthPt, hPt: cs.pageHeightPt })),
+      perPage,
       lastPageLineCount: receipt.lastPageLineCount,
       overflowLinesOnLastPage: receipt.overflowLinesOnLastPage,
       blockToPage: receipt.blockToPage,
