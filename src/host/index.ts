@@ -136,7 +136,7 @@ function toolErrorResult(error: unknown) {
   return { ok: false as const, error: errorMessage(error) }
 }
 
-function renderJson(value: unknown): Array<{ type: 'text'; text: string }> {
+function renderJson(_args: unknown, value: unknown): Array<{ type: 'text'; text: string }> {
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
 }
 
@@ -290,7 +290,7 @@ export function registerGalleyTools(ctx: Context): () => void {
         blockIds: { type: 'array', items: { type: 'string' }, description: 'Batch: several block ids at once.' },
       },
     },
-    output: out({ ok: { type: 'boolean' }, packetId: { type: 'string' }, blocks: { type: 'array' } }),
+    output: out({ ok: { type: 'boolean' }, packetId: { type: 'string' }, blocks: { type: 'array', items: { type: 'object', additionalProperties: true } } }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
         return await galleyReadBlock(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyReadBlock>[1]))
@@ -325,11 +325,11 @@ export function registerGalleyTools(ctx: Context): () => void {
       required: ['sheetId', 'op'],
     },
     output: out({
-      ok: { type: 'boolean' }, packetId: { type: 'string' }, rev: { type: 'integer' },
-      block: { type: ['object', 'null'] },
-      proposal: { type: ['object', 'null'] },
-      proof: { type: ['object', 'null'] },
-      staleDependents: { type: 'array' },
+      ok: { type: 'boolean' },
+      applied: { type: 'boolean' },
+      packetId: { type: 'string' },
+      rev: { type: 'integer' },
+      staleDependents: { type: 'array', items: { type: 'string' } },
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
@@ -357,7 +357,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       },
       required: ['blockId', 'action'],
     },
-    output: out({ ok: { type: 'boolean' }, annotations: { type: 'array' } }),
+    output: out({ ok: { type: 'boolean' }, annotations: { type: 'array', items: { type: 'object', additionalProperties: true } } }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
         const a = { ...args, author: 'agent' }

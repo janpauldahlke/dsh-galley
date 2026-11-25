@@ -228,6 +228,15 @@ test('§4 gate: host registerGalleyTools wires assetBytes + locks LLM origin/aut
     assert.equal(registered.get('galley_edit_block').parameters.properties.origin, undefined)
     assert.equal(registered.get('galley_annotate').parameters.properties.author, undefined)
 
+    // Verify DSH output.render signature is (args, result) — never 1-arg (args)!
+    for (const [toolName, def] of registered.entries()) {
+      const rendered = def.output.render({ ignoredArg: true }, { ok: true, marker: toolName })
+      assert.match(rendered[0].text, new RegExp(`"marker":\\s*"${toolName}"`))
+      for (const prop of Object.values(def.output.schema.properties)) {
+        assert.equal(Array.isArray(prop.type), false, `${toolName} output schema must not use array type unions`)
+      }
+    }
+
     // P0-1: execute through the real host getDeps() closure with a real PNG media slot!
     const prevRoot = process.env.GALLEY_ROOT
     process.env.GALLEY_ROOT = root
