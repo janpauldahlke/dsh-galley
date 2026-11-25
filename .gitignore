@@ -8,8 +8,9 @@ ENV.md
 # Build / deps
 node_modules/
 dist/
-# Scratch benchmark outputs
+# Scratch benchmark & runtime export outputs
 out/
+galley-exports/
 # Vendored Typst CLI binary (~70 MB; fetched by install script, never published)
 vendor/
 # Scratch probe dirs
