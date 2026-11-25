@@ -27,7 +27,6 @@
  *     segmented by `<g class="typst-page">` byte offsets (`parseSvgPages`); an
  *     anchor's page is the page segment whose byte range contains it — no
  *     transform math (more robust on multi-page output than a y-walk).
- * Both channels are validated end-to-end in `agent/typst/exp/receipt-probe.mjs`.
  */
 
 import type {

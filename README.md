@@ -1,13 +1,12 @@
 # dsh-galley
 
-> **Status:** `0.0.1` — Exploration Phase / local Model
+> **Status:** `0.1.0` — M1 Core (Block Store, Native Typst Proof & 6-Tool Surface)
 
 Shared volatile **document workbench & typesetter** (*Druck und Satz*) for
 human + agent co-authoring in the **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) web and desktop UI.
 
 npm package (planned) and GitHub repo share the name `dsh-galley`
 ([`janpauldahlke/dsh-galley`](https://github.com/janpauldahlke/dsh-galley)).
-First foundational plugin of **The Ivory Tower** document & knowledge studio suite.
 
 ---
 
@@ -72,18 +71,16 @@ instant local **Typst** page typesetting and deterministic exporters.
 
 ---
 
-## Planned Agent Tool Catalog (v0 draft)
+## Agent Tool Catalog (6-tool surface)
 
 | Tool | Role |
 | --- | --- |
-| `galley_open` | Initialize or switch active galley packet (*Mappe*), template, and page geometry |
-| `galley_status` | Compact outline: sheets, block IDs, types, hashes, page count, overflow, stale links |
-| `galley_read_block` | Read verbatim content of specific block ID(s) on demand |
-| `galley_insert_block` | Insert a typed block (`header`, `prose`, `source_text`, `task`, `table`, `callout`, `answer`) with optional media slot & `dependsOn` |
-| `galley_patch_block` | Surgical update to one block (renders as inline diff proposal when touching existing content; returns Typst page/overflow receipt) |
-| `galley_move_block` / `galley_remove_block` | Reorder or remove keyed blocks |
-| `galley_annotate` | Attach or resolve non-destructive margin notes (*Randnotizen*) on a block |
-| `galley_export` | Compile finalized packet to `.pdf`, `.docx`, `.typ`, `.tex`, or `.md` |
+| `galley_open` | Initialize or switch active galley packet (*Mappe*), template (`arbeitsblatt`, `rfc`, `generic`), and page geometry |
+| `galley_status` | Compact outline: sheets, block IDs, types, hashes, word counts, page count, overflow, stale links, proposals & annotations |
+| `galley_read_block` | Read verbatim content of specific block ID(s) with neighbor context and dependency edges |
+| `galley_edit_block` | Single writer (`insert` / `patch` / `move` / `remove`): patches on human-origin blocks stage inline diff proposals; returns compact Typst proof receipt |
+| `galley_annotate` | Add, list, resolve, or unresolve non-destructive margin notes (*Randnotizen*) on a block |
+| `galley_export` | Compile sheet/packet to `.pdf`, `.typ`, `.tex`, or `.md` (`.docx` landing in M4) |
 
 ---
 

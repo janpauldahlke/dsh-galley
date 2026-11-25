@@ -1,11 +1,11 @@
 /**
- * dsh-galley — M1.5 §4 REAL-COMPILER GATE (agent/reviews/01-m1-review-and-handover §4).
+ * dsh-galley — real-compiler integration gate (NativeArm).
  *
  * The M0/M1 guardrail was that the *tools* could run against a fake renderer.
  * This gate closes the loop: it drives a REAL sheet — all 8 block types, all 5
  * layout slots, and a real 1×1 PNG media asset — through the **NativeArm**
  * (the N-API `@myriaddreamin/typst-ts-node-compiler`, NOT `fakeRender`) and
- * asserts, per the review, that:
+ * asserts that:
  *
  *   1. the native compile emits ZERO diagnostics,
  *   2. EVERY table cell's text appears in the rendered SVG,
