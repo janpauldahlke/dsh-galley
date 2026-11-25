@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto'
 import {
   mkdirSync,
-  rmdirSync,
+  rmSync,
   readFileSync,
   writeFileSync,
   renameSync,
@@ -76,15 +76,13 @@ export function hashContent(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex')
 }
 
-/** The content projection of a block: everything EXCEPT derived/timestamp. */
+/** The content projection of a block: content + structural fields ONLY (spec 01 §5: excludes id, hash, stale, origin, updatedAt). */
 export function blockContentProjection(block: Block): Record<string, unknown> {
   const b = block as unknown as Record<string, unknown>
   const out: Record<string, unknown> = {
-    id: b.id,
     type: b.type,
     dependsOn: b.dependsOn,
     slot: b.slot,
-    origin: b.origin,
   }
   if (b.fields !== undefined) out.fields = b.fields
   if (b.body !== undefined) out.body = b.body
@@ -240,10 +238,7 @@ export class GalleyStore {
     const dir = this.dir(id)
     if (!existsSync(dir)) throw new StoreError('not_found', `packet ${id} not found`)
     if (this.getActivePacket() === id) this.clearActivePacket()
-    for (const name of readdirSync(dir)) {
-      unlinkSync(join(dir, name))
-    }
-    rmdirSync(dir)
+    rmSync(dir, { recursive: true, force: true })
   }
 
   // ── active packet (M1.5 H4): the packet tools operate on by default ──────
@@ -398,12 +393,18 @@ export class GalleyStore {
         const b = sheet.blocks.find((x) => x.id === proposal.targetBlockId)! as unknown as Record<string, unknown>
         for (const [k, v] of Object.entries(proposal.proposedPatch)) {
           if (k === 'body') {
-            // The proposal stored the raw patch (body may be a string); normalize
-            // to Inline[] exactly like the direct patch path.
             b.body = typeof v === 'string' ? [{ t: 'text', v }] : (Array.isArray(v) ? v : [{ t: 'text', v: String(v) }])
-          } else {
+          } else if (k !== 'origin' && k !== 'id' && k !== 'hash') {
             b[k] = v
           }
+        }
+        // Spec 01 §6: accepting a proposal refreshes outgoing dependency edges to current origin hashes.
+        if (Array.isArray(b.dependsOn) && b.dependsOn.length > 0) {
+          const now = new Date().toISOString()
+          b.dependsOn = (b.dependsOn as DepEdge[]).map((d) => {
+            const origin = findBlock(p, d.id)
+            return origin ? { id: d.id, sinceHash: origin.block.hash, at: now } : d
+          })
         }
         b.origin = 'agent' // spec 01 §7: accept → origin = 'agent'
         return proposal.targetBlockId

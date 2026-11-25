@@ -31,7 +31,7 @@ import {
   galleyStatus,
   galleyEditBlock,
 } from '../lib/galley-core.mjs'
-import { NativeArm } from '../lib/index.js'
+import { NativeArm, registerGalleyTools } from '../lib/index.js'
 
 /**
  * A valid 1×1 RGBA PNG — the smallest real image the native arm's decoder
@@ -79,7 +79,12 @@ async function buildGateSheet() {
       { type: 'header', fields: { titel: 'Gate', fach: 'Mathe', klasse: '7a', datum: '2026-11-25', name: 'HauHau' } },
       { type: 'heading', level: 1, body: 'Section' },
       { type: 'prose', body: 'Body prose paragraph.' },
-      { type: 'source_text', title: 'Source', body: 'const x = 1' },
+      {
+        type: 'source_text',
+        title: 'Quelltext',
+        body: 'Zeile eins\nZeile zwei\nZeile drei\nZeile vier\nZeile fuenf\nZeile sechs',
+        lineNumbers: { every: 5 },
+      },
       { type: 'task', body: 'Do the task.' },
       {
         type: 'table',
@@ -90,7 +95,11 @@ async function buildGateSheet() {
         ],
       },
       { type: 'callout', tone: 'info', body: 'A hint.', slot: { mode: 'two-column' } },
-      { type: 'answer', body: '42', slot: { mode: 'card-grid', columns: 2 } },
+      {
+        type: 'answer',
+        body: [T('CardAlpha'), { t: 'newline' }, T('CardBeta'), { t: 'newline' }, T('CardGamma')],
+        slot: { mode: 'card-grid', columns: 3, cardHeightCm: 4 },
+      },
     ],
     // Stage media metadata; real bytes are added afterwards (open stages empty).
     assets: [{ id: 'a1', path: 'assets/a1.png', mimeType: 'image/png' }, { id: 'a2', path: 'assets/a2.png', mimeType: 'image/png' }],
@@ -128,10 +137,21 @@ test('§4 gate: 8 types × 5 slots × real PNG compile with ZERO diagnostics', {
     assert.ok(sr.blockToPage[b.id] >= 0 && sr.blockToPage[b.id] < sr.pages, `block ${b.id} on invalid page`)
   }
 
-  // 2. Every table cell's text appears in the rendered SVG.
+  // 2. Every table cell's text appears in the rendered SVG, WITHOUT literal `[` / `]` bracket soup!
+  const tsel = [...sr.svg.matchAll(/class="tsel"[^>]*>([^<]*)</g)].map((m) => m[1])
+  const joinedTsel = tsel.join(' ')
   for (const cell of ['Alpha', 'Beta', 'OneCell', 'TwoCell', 'ThreeCell', 'FourCell']) {
-    assert.ok(sr.svg.includes(cell), `table cell text "${cell}" not found in rendered SVG`)
+    assert.ok(tsel.includes(cell), `table cell "${cell}" not rendered as its own run in SVG tsel: ${JSON.stringify(tsel)}`)
   }
+  assert.ok(!joinedTsel.includes('] ['), `table rendered literal bracket soup in SVG: ${joinedTsel}`)
+
+  // source_text title + marginal line number 5 + card-grid dashed cells all rendered.
+  assert.ok(tsel.includes('Quelltext'), 'source_text title missing from rendered SVG')
+  assert.ok(tsel.includes('5'), 'marginal line number 5 missing from rendered SVG')
+  for (const card of ['CardAlpha', 'CardBeta', 'CardGamma']) {
+    assert.ok(tsel.includes(card), `card-grid cell "${card}" missing from rendered SVG`)
+  }
+  assert.match(sr.svg, /stroke-dasharray/, 'card-grid dashed cut lines missing from rendered SVG')
 
   // The media slots reference real images (the asset bytes are shadow-mapped).
   for (const id of ['a1', 'a2']) {
@@ -191,4 +211,52 @@ test('§4 gate: galley_open / galley_status proofs come from a real NativeArm re
   assert.equal(st.ok, true)
   assert.ok(st.proofs.s1)
   assert.equal(st.proofs.s1.pages, proof.pages)
+})
+
+test('§4 gate: host registerGalleyTools wires assetBytes + locks LLM origin/author to agent', { skip: !nativeAvailable && 'native arm unavailable' }, async () => {
+  const registered = new Map()
+  const dispose = registerGalleyTools({
+    tools: {
+      register(def) {
+        registered.set(def.name, def)
+        return () => registered.delete(def.name)
+      },
+    },
+  })
+  try {
+    // H5: neither galley_edit_block nor galley_annotate exposes origin/author to the LLM.
+    assert.equal(registered.get('galley_edit_block').parameters.properties.origin, undefined)
+    assert.equal(registered.get('galley_annotate').parameters.properties.author, undefined)
+
+    // P0-1: execute through the real host getDeps() closure with a real PNG media slot!
+    const prevRoot = process.env.GALLEY_ROOT
+    process.env.GALLEY_ROOT = root
+    try {
+      const opened = await registered.get('galley_open').execute({
+        title: 'Host Media Gate',
+        blocks: [{ type: 'prose', body: 'Seed by LLM' }],
+        assets: [{ id: 'a1', path: 'assets/a1.png', mimeType: 'image/png' }],
+      })
+      assert.equal(opened.ok, true)
+      assert.equal(opened.blocks.s1[0].origin, 'agent', 'LLM-opened blocks must be agent-origin')
+      store.addAsset(opened.packetId, meta('a1'), PNG)
+      const edited = await registered.get('galley_edit_block').execute({
+        packetId: opened.packetId,
+        sheetId: 's1',
+        op: 'insert',
+        block: { type: 'prose', body: 'With real PNG via host getDeps()', slot: { mode: 'media-right', asset: assetRef('a1') } },
+      })
+      assert.equal(edited.ok, true)
+      assert.ok(edited.proof && edited.proof.pages >= 1, 'host getDeps() must forward assetBytes so media slots compile!')
+      const pdfExport = await registered.get('galley_export').execute({ packetId: opened.packetId, format: 'pdf' })
+      assert.equal(pdfExport.ok, true)
+      assert.equal(Buffer.from(pdfExport.bytes.slice(0, 5)).toString('latin1'), '%PDF-')
+      store.delete(opened.packetId)
+    } finally {
+      if (prevRoot === undefined) delete process.env.GALLEY_ROOT
+      else process.env.GALLEY_ROOT = prevRoot
+    }
+  } finally {
+    dispose()
+  }
 })

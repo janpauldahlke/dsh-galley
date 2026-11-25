@@ -209,27 +209,75 @@ const CALLOUT_TONES: Record<'info' | 'hint' | 'warning', { fill: string; accent:
  * inert to any metacharacters. The arms map that path to the asset bytes
  * (native `mapShadow`) so the image resolves offline.
  */
-function mediaImage(assets: Record<string, unknown> | undefined, assetId: string): string {
+function mediaImage(
+  assets: Record<string, unknown> | undefined,
+  assetId: string,
+  widthCm?: number,
+): string {
   const meta = assets?.[assetId] as { path?: string } | undefined
-  return meta?.path ? `#image(${JSON.stringify(meta.path)}, width: 100%)` : ''
+  if (!meta?.path) return ''
+  const w = widthCm !== undefined && Number.isFinite(widthCm) && widthCm > 0 ? `${widthCm}cm` : '100%'
+  return `#image(${JSON.stringify(meta.path)}, width: ${w})`
 }
 
-/** Wrap a rendered block body in its layout slot (spec 03 §4.1, M1.5 H2). */
-function wrapSlot(slot: LayoutSlot | undefined, body: string, assets?: Record<string, unknown>): string {
+/** Split a block's inline body into discrete card cell contents for `card-grid` (spec 01 §3 / spec 03 §5.2). */
+function cardCellsFromBlock(block: Block, renderedFallback: string): string[] {
+  const body = (block as { body?: Inline[] }).body
+  if (!body || body.length === 0) return [renderedFallback]
+  // Split on explicit newline runs or `\n` inside text runs first.
+  const hasLineBreaks = body.some((it) => it.t === 'newline' || (it.t === 'text' && it.v.includes('\n')))
+  if (hasLineBreaks) {
+    const groups: Inline[][] = []
+    let cur: Inline[] = []
+    for (const it of body) {
+      if (it.t === 'newline') {
+        groups.push(cur)
+        cur = []
+      } else if (it.t === 'text' && it.v.includes('\n')) {
+        const parts = it.v.split('\n')
+        parts.forEach((p, idx) => {
+          if (idx > 0) {
+            groups.push(cur)
+            cur = []
+          }
+          if (p.length > 0) cur.push({ t: 'text', v: p })
+        })
+      } else {
+        cur.push(it)
+      }
+    }
+    groups.push(cur)
+    const nonEmpty = groups.filter((g) => g.length > 0)
+    if (nonEmpty.length > 0) return nonEmpty.map((g) => inlineToContent(g))
+  }
+  // Otherwise multiple top-level inline items each become one card cell (spec 01 §3).
+  if (body.length > 1) return body.map((it) => inlineToContent([it]))
+  return [renderedFallback]
+}
+
+/** Wrap a rendered block body in its layout slot (spec 03 §4.1, M1.6). */
+function wrapSlot(block: Block, body: string, assets?: Record<string, unknown>): string {
+  const slot = block.slot
   switch (slot?.mode) {
     case 'media-right': {
-      const img = slot.asset ? mediaImage(assets, slot.asset.id) : ''
+      const img = slot.asset ? mediaImage(assets, slot.asset.id, slot.asset.widthCm) : ''
       return `#grid(columns: (65%, 35%), column-gutter: 12pt)[${body}][${img}]`
     }
     case 'media-left': {
-      const img = slot.asset ? mediaImage(assets, slot.asset.id) : ''
+      const img = slot.asset ? mediaImage(assets, slot.asset.id, slot.asset.widthCm) : ''
       return `#grid(columns: (35%, 65%), column-gutter: 12pt)[${img}][${body}]`
     }
     case 'two-column':
       return `#columns(2, gutter: 12pt)[${body}]`
     case 'card-grid': {
-      const h = (((slot.cardHeightCm ?? 6) * PT_PER_CM).toFixed(1))
-      return `#block(width: 100%, height: ${h}pt, inset: 8pt, fill: luma(251), stroke: (0.5pt + luma(185)))[${body}]`
+      const cols = slot.columns ?? 3
+      const h = ((slot.cardHeightCm ?? 6) * PT_PER_CM).toFixed(1)
+      const colSpec = `(${Array.from({ length: cols }, () => '1fr').join(', ')})`
+      const cards = cardCellsFromBlock(block, body).map(
+        (c) =>
+          `block(width: 100%, height: ${h}pt, inset: 8pt, fill: luma(251), stroke: (paint: luma(130), thickness: 0.6pt, dash: "dashed"))[${c}]`,
+      )
+      return `#grid(columns: ${colSpec}, column-gutter: 8pt, row-gutter: 8pt, ${cards.join(', ')})`
     }
     default:
       return body
@@ -254,7 +302,10 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       const right = `[${meta.length ? meta.join('#linebreak()') : ''}]`
       const left: string[] = [`#text(size: 8pt, fill: luma(110), ${typString('TITEL')})`]
       if (f.titel) left.push(`#text(size: 17pt, weight: "bold", ${typString(f.titel)})`)
-      if (f.name) left.push(`#text(size: 9pt, fill: luma(110), ${typString('Name: ' + f.name)})`)
+      if (f.name !== undefined) {
+        const nameVal = f.name.trim() ? f.name : '________________________'
+        left.push(`#text(size: 9pt, fill: luma(110), ${typString('Name: ' + nameVal)})`)
+      }
       lines.push(
         `#grid(columns: (1fr, auto), column-gutter: 12pt, align: (top, top))` +
           `[#linebreak()${left.join('#linebreak()')}#linebreak()]${right}`,
@@ -294,18 +345,22 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       }
       lineRuns.push(cur)
       const ln = block.lineNumbers
+      if (block.title) {
+        // Blank line (`''`) ends the title paragraph so `#set par.line` inside `#[...]`
+        // starts a fresh paragraph scope (Typst evaluates par.line per paragraph).
+        lines.push(`#strong[#text(${typString(block.title)})]`, '')
+      }
       if (ln) {
         // Native 0.14.2 marginal line numbers (review H2.2). Scoped inside a
         // #[...] group so the numbering does not leak past the block. `n` is
-        // 1-based; `start` offsets the displayed gutter number.
+        // 1-based across numbered lines; `start` offsets the displayed gutter number.
         const every = Math.max(1, ln.every ?? 1)
         const startOff = (ln.start ?? 1) - 1
         const numExpr = startOff === 0 ? '#n' : `#(n + ${startOff})`
         lines.push(
           `#[`,
-          `#set par.line(numbering: n => if calc.rem(n, ${every}) == 0 { text(size: 8pt, fill: luma(110))[${numExpr}] }, numbering-scope: "page")`,
+          `#set par.line(numbering: n => if calc.rem(n, ${every}) == 0 { text(size: 8pt, fill: luma(110))[${numExpr}] })`,
           lineRuns.map((runs) => inlineToContent(runs)).join(' \\ '),
-          `#set par.line(numbering: none)`,
           `]`,
         )
       } else {
@@ -330,16 +385,25 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
         while (out.length < cols) out.push([])
         return out.map(padFn)
       }
-      // 0.14.2 has NO `table.header` parameter: cells go flat inside one
-      // content block, and the first row is bold so it reads as the header.
-      const all = [...pad(block.headers, headerCell), ...block.rows.flatMap((r) => pad(r, cell))]
-      lines.push(`#table(columns: ${cols}, fill: luma(0.98), stroke: 0.5pt + luma(0.45))[${all.join(' ')}]`)
+      // Each cell MUST be its own comma-separated positional argument;
+      // table.header(...) works natively in 0.14.2 and 0.15.1.
+      const hdr = pad(block.headers, headerCell)
+      const bodyCells = block.rows.flatMap((r) => pad(r, cell))
+      const tableArgs = [
+        `columns: ${cols}`,
+        `inset: 6pt`,
+        `fill: (_, y) => if y == 0 { luma(245) } else { rgb(255, 255, 255) }`,
+        `stroke: 0.5pt + luma(180)`,
+        `table.header(${hdr.join(', ')})`,
+        ...bodyCells,
+      ]
+      lines.push(`#table(${tableArgs.join(', ')})`)
       break
     }
     case 'callout': {
       const t = CALLOUT_TONES[block.tone ?? 'info']
       lines.push(
-        `#box(inset: (x: 0pt, y: 6pt), fill: ${t.fill}, stroke: (left: 3pt + ${t.accent}))[`,
+        `#block(width: 100%, inset: 8pt, fill: ${t.fill}, stroke: (left: 3pt + ${t.accent}))[`,
         `#text(size: 8pt, weight: "bold", fill: ${t.accent}, ${typString(t.label)})`,
         `#linebreak()`,
         inlineToContent(block.body),
@@ -351,10 +415,11 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       lines.push(inlineToContent(block.body))
       break
   }
-  // Wrap the rendered body (lines 1..n) in the block's layout slot.
-  const body = lines.slice(1).join('\n')
-  lines.length = 1
-  lines.push(wrapSlot(block.slot, body, assets))
+  // Keep marker (lines[0]) + zero-flow anchor (lines[1]) OUTSIDE the layout slot
+  // so multi-column / card-grid wrappers never displace or duplicate the anchor.
+  const body = lines.slice(2).join('\n')
+  lines.length = 2
+  lines.push(wrapSlot(block, body, assets))
   return lines.join('\n')
 }
 
@@ -389,19 +454,13 @@ function preamble(sheet: GalleySheet): string[] {
   return L
 }
 
-/** Deterministic pure function: sheet → `.typ` (spec 03 §4; M1.5 H3.2). */
+/** Deterministic pure function: sheet → `.typ` (spec 03 §4; M1.6). */
 export function compileSheet(sheet: GalleySheet, assets?: Record<string, unknown>): CompileSheetResult {
   const dim = PAPER_PT[sheet.geometry.paper]
   const lines: string[] = [...preamble(sheet), '']
   const anchors: { blockId: BlockId; hex: string }[] = []
-  // Arbeitsblatt 2-sheet template: when a `header` block is present, insert a
-  // page break before the first `answer` block so tasks (sheet 1) and answers
-  // (sheet 2) land on separate pages.
-  const firstAnswer = sheet.blocks.findIndex((b) => b.type === 'answer')
-  const isArbeitsblatt = sheet.blocks.some((b) => b.type === 'header') && firstAnswer >= 0
   let taskCount = 0
   sheet.blocks.forEach((block, i) => {
-    if (isArbeitsblatt && i === firstAnswer) lines.push('#pagebreak()', '')
     if (block.type === 'task') taskCount += 1
     lines.push(blockTypst(block, i, assets, block.type === 'task' ? taskCount : undefined))
     lines.push('')

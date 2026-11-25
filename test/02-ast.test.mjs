@@ -63,7 +63,7 @@ test('typstStringLiteral never yields an unterminated literal (property test)', 
   }
 })
 
-test('block 1/8: header renders a 2-column arbeitsblatt banner', () => {
+test('block 1/8: header renders a 2-column arbeitsblatt banner (incl. blank Name fill-in)', () => {
   const b = B('b1', 'header', { fields: { titel: 'Mein Blatt', name: 'Anna' } })
   const out = blockTypst(b, 0)
   assert.equal(out.split('\n')[0], markerComment('b1'))
@@ -71,6 +71,9 @@ test('block 1/8: header renders a 2-column arbeitsblatt banner', () => {
   assert.match(out, /#grid\(columns: \(1fr, auto\)/)
   assert.match(out, /#text\(size: 17pt, weight: "bold", "Mein Blatt"\)/)
   assert.match(out, /#text\(size: 9pt, fill: luma\(110\), "Name: Anna"\)/)
+
+  const blank = blockTypst(B('b1', 'header', { fields: { titel: 'Arbeitsblatt', name: '' } }), 0)
+  assert.match(blank, /"Name: ____/)
 })
 
 test('block 2/8: heading honours level', () => {
@@ -86,17 +89,19 @@ test('block 3/8: prose renders inline runs (#strong, not markdown)', () => {
   assert.match(out, /#text\("Hello "\)#strong\[#text\("world"\)\]/)
 })
 
-test('block 4/8: source_text wraps lines with `\\`', () => {
-  const b = B('b1', 'source_text', { body: [T('line one\nline two')] })
+test('block 4/8: source_text emits title + wraps lines + supports lineNumbers', () => {
+  const b = B('b1', 'source_text', { title: 'Goethe', body: [T('line one\nline two')], lineNumbers: { every: 5 } })
   const out = blockTypst(b, 0)
-  assert.match(out, /#text\("line one"\)\\ #text\("line two"\)/)
+  assert.match(out, /#strong\[#text\("Goethe"\)\]\n\n#\[/)
+  assert.match(out, /#set par\.line\(numbering:/)
+  assert.match(out, /#text\("line one"\) \\ #text\("line two"\)/)
 })
 
 test('block 5/8: task renders body', () => {
   assert.match(blockTypst(B('b1', 'task', { body: [T('Do the thing')] }), 0), /#text\("Do the thing"\)/)
 })
 
-test('block 6/8: table builds flat #table(columns)[cells] with bold first row', () => {
+test('block 6/8: table builds positional cell args + table.header (never trailing bracket soup)', () => {
   const b = B('b1', 'table', {
     headers: [[T('A')], [T('B')]],
     rows: [[[T('1')], [T('2')]], [[T('3')], [T('4')]]],
@@ -104,13 +109,13 @@ test('block 6/8: table builds flat #table(columns)[cells] with bold first row', 
   const out = blockTypst(b, 0)
   assert.match(
     out,
-    /#table\(columns: 2, fill: luma\(0\.98\), stroke: 0\.5pt \+ luma\(0\.45\)\)\[\[#strong\[#text\("A"\)\]\] \[#strong\[#text\("B"\)\]\] \[#text\("1"\)\] \[#text\("2"\)\] \[#text\("3"\)\] \[#text\("4"\)\]\]/,
+    /#table\(columns: 2, inset: 6pt, fill: \(_, y\) => if y == 0 \{ luma\(245\) \} else \{ rgb\(255, 255, 255\) \}, stroke: 0\.5pt \+ luma\(180\), table\.header\(\[#strong\[#text\("A"\)\]\], \[#strong\[#text\("B"\)\]\]\), \[#text\("1"\)\], \[#text\("2"\)\], \[#text\("3"\)\], \[#text\("4"\)\]\)/,
   )
 })
 
-test('block 7/8: callout renders a tinted box per tone (rgb 0-255, left stroke)', () => {
+test('block 7/8: callout renders a full-width tinted block per tone (rgb 0-255, 8pt inset, left stroke)', () => {
   const info = blockTypst(B('b1', 'callout', { tone: 'info', body: [T('note')] }), 0)
-  assert.match(info, /fill: rgb\(232, 240, 254\)/)
+  assert.match(info, /#block\(width: 100%, inset: 8pt, fill: rgb\(232, 240, 254\)/)
   assert.match(info, /stroke: \(left: 3pt \+ rgb\(26, 115, 232\)\)/)
   assert.match(blockTypst(B('b1', 'callout', { tone: 'warning', body: [T('w')] }), 0), /fill: rgb\(252, 232, 230\)/)
   assert.match(blockTypst(B('b1', 'callout', { tone: 'hint', body: [T('h')] }), 0), /fill: rgb\(230, 244, 234\)/)
