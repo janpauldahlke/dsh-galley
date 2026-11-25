@@ -126,8 +126,9 @@ function renderJson(value: unknown): Array<{ type: 'text'; text: string }> {
 
 // ── M1 wiring: one store + one primary arm per plugin load ──────────────────
 
-const storeRoot = process.env.GALLEY_ROOT ?? join(process.cwd(), '.dsh', 'galley')
-const store = new GalleyStore(storeRoot)
+function getStore(): GalleyStore {
+  return new GalleyStore(process.env.GALLEY_ROOT ?? join(process.cwd(), '.dsh', 'galley'))
+}
 
 let armPromise: Promise<Arm> | null = null
 function getArm(): Promise<Arm> {
@@ -136,7 +137,11 @@ function getArm(): Promise<Arm> {
 }
 async function getDeps(): Promise<GalleyToolsDeps> {
   const arm = await getArm()
-  return { store, render: (sheet: GalleySheet, packet: GalleyPacket) => arm.render(sheet, packet) }
+  return {
+    store: getStore(),
+    render: (sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>) =>
+      arm.render(sheet, packet, assetBytes),
+  }
 }
 
 /** Register the six M1 tools (tools face). */
@@ -158,12 +163,13 @@ export function registerGalleyTools(ctx: Context): () => void {
   register({
     name: 'galley_open',
     description:
-      'Open (create) a new galley packet with an optional initial block list. It becomes the active packet and ' +
+      'Open (create) a new galley packet or switch to an existing packet via `id`. It becomes the active packet and ' +
       'returns a compact receipt (packetId, rev, per-sheet block outlines, per-sheet proofs) — never the full block bodies.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
+        id: { type: 'string', description: 'Switch active packet to an existing packetId (exclusive with create fields).' },
         template: { type: 'string', enum: ['arbeitsblatt', 'rfc', 'generic'] },
         title: { type: 'string' },
         targetPages: { type: 'integer' },
@@ -195,7 +201,9 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>) {
       try {
-        return await galleyOpen(await getDeps(), (args as unknown as Parameters<typeof galleyOpen>[1]))      } catch (error) {
+        const a = args.id !== undefined ? args : { ...args, origin: 'agent' }
+        return await galleyOpen(await getDeps(), (a as unknown as Parameters<typeof galleyOpen>[1]))
+      } catch (error) {
         return toolErrorResult(error)
       }
     },
@@ -264,8 +272,9 @@ export function registerGalleyTools(ctx: Context): () => void {
         beforeId: { type: 'string' },
         block: { type: 'object', additionalProperties: true },
         blockId: { type: 'string' },
-        baseHash: { type: 'string' },
+        baseHash: { type: 'string', description: 'Optional optimistic-lock hash; checked when supplied.' },
         patch: { type: 'object', additionalProperties: true },
+        toSheetId: { type: 'string', description: 'Optional target sheet for cross-sheet move.' },
         toBeforeId: { type: 'string' },
         toAfterId: { type: 'string' },
       },
@@ -291,7 +300,7 @@ export function registerGalleyTools(ctx: Context): () => void {
 
   register({
     name: 'galley_annotate',
-    description: 'Add / list / resolve / unresolve a comment anchored to a block.',
+    description: 'Add / list / resolve / unresolve a margin note (Randnotiz) anchored to a block.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -299,7 +308,6 @@ export function registerGalleyTools(ctx: Context): () => void {
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         blockId: { type: 'string' },
         action: { type: 'string', enum: ['add', 'list', 'resolve', 'unresolve'] },
-        author: { type: 'string', enum: ['human', 'agent'] },
         body: {},
         annotationId: { type: 'string' },
       },
@@ -308,7 +316,9 @@ export function registerGalleyTools(ctx: Context): () => void {
     output: out({ ok: { type: 'boolean' }, annotations: { type: 'array' } }),
     async execute(args: Record<string, unknown>) {
       try {
-        return await galleyAnnotate(await getDeps(), (args as unknown as Parameters<typeof galleyAnnotate>[1]))      } catch (error) {
+        const a = { ...args, author: 'agent' }
+        return await galleyAnnotate(await getDeps(), (a as unknown as Parameters<typeof galleyAnnotate>[1]))
+      } catch (error) {
         return toolErrorResult(error)
       }
     },

@@ -76,9 +76,10 @@ test('create + load round-trip (derived flags recomputed, rev=1)', () => {
   assert.equal(loaded.sheets.s1.blocks[0].stale, null)
 })
 
-test('list + delete', () => {
+test('list + delete (including packets with assets/ subdir)', () => {
   const a = store.create(mkPacket([], 'p-aaaaaaaa'))
   const b = store.create(mkPacket([], 'p-bbbbbbbb'))
+  store.addAsset(a.id, { id: 'a1', path: 'assets/a1.png', bytesSha256: '00', mimeType: 'image/png' }, Buffer.from([1, 2, 3]))
   const ids = store.list().map((x) => x.id).sort()
   assert.ok(ids.includes(a.id) && ids.includes(b.id))
   store.delete(a.id)
@@ -87,13 +88,18 @@ test('list + delete', () => {
   assert.throws(() => store.delete(a.id), (e) => e instanceof StoreError && e.code === 'not_found')
 })
 
-test('hash: deterministic, key-order independent, content-only', () => {
+test('hash: deterministic, key-order independent, content-only (excludes id + origin)', () => {
   const mk = (body) => mkBlock('b1', 'prose', { body })
   assert.equal(hashBlock(mk([T('hi')])), hashBlock(mk([T('hi')])))
   assert.notEqual(hashBlock(mk([T('hi')])), hashBlock(mk([T('bye')])))
-  // non-content fields (updatedAt / stale / rev) do not affect the hash.
-  const base = mkBlock('b1', 'prose', { body: [T('hi')] })
-  const other = mkBlock('b1', 'prose', { body: [T('hi')], updatedAt: 'now', stale: { state: 'stale_dependency', origin: 'z', sinceHash: 'q' } })
+  // non-content fields (id / origin / updatedAt / stale) do not affect the hash (spec 01 §5).
+  const base = mkBlock('b1', 'prose', { body: [T('hi')], origin: 'agent' })
+  const other = mkBlock('b99', 'prose', {
+    body: [T('hi')],
+    origin: 'human',
+    updatedAt: 'now',
+    stale: { state: 'stale_dependency', origin: 'z', sinceHash: 'q' },
+  })
   assert.equal(hashBlock(base), hashBlock(other))
   // canonicalJson is key-order independent.
   assert.equal(canonicalJson({ a: 1, b: { x: 2 } }), canonicalJson({ b: { x: 2 }, a: 1 }))

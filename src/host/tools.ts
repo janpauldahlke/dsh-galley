@@ -277,6 +277,10 @@ export function buildBlock(
   const slot = (raw.slot as LayoutSlot) ?? { mode: 'full' }
   const slotErr = validateSlot(slot)
   if (slotErr) return { block: null as unknown as Block, error: slotErr }
+  // Spec 01 §3: header and heading blocks are always { mode: 'full' }.
+  if ((type === 'header' || type === 'heading') && slot.mode !== 'full') {
+    return { block: null as unknown as Block, error: 'invalid_block' }
+  }
   // A media slot references an asset that must already exist in the packet
   // (spec 02 §3 GALLEY_ASSET_NOT_FOUND). Assets are staged by the pane; the
   // tools only validate the reference.
@@ -388,10 +392,14 @@ export interface GalleyToolsDeps {
 // ── Tool 1: galley_open ─────────────────────────────────────────────────────
 
 export interface OpenArgs {
+  /** Switch active packet to an existing packet id (exclusive with create fields, spec 02 §4.1). */
+  id?: string
   template?: 'arbeitsblatt' | 'rfc' | 'generic'
   title?: string
   blocks?: Record<string, unknown>[]
   targetPages?: number
+  /** Provenance for initial `blocks` (default 'human' for pane/hermetic seed; 'agent' from LLM tool). */
+  origin?: 'human' | 'agent'
   /**
    * Assets to stage with the packet (metadata only; the pane supplies real
    * bytes via `store.addAsset`). M1 headless stages empty buffers so the
@@ -411,7 +419,29 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
   proofs: Record<SheetId, SheetProofReceipt | null>
 }> | ToolFailure> {
   const { store } = deps
+  if (args.id !== undefined) {
+    if (args.template || args.title || args.blocks || args.targetPages !== undefined || args.assets) {
+      return fail(Err.INVALID_PARAMS, 'id is exclusive with packet creation fields')
+    }
+    const existing = store.load(args.id)
+    if (!existing) return fail(Err.PACKET_NOT_FOUND, `packet ${args.id} not found`)
+    store.setActivePacket(existing.id)
+    const blocks: Record<SheetId, BlockOutline[]> = {}
+    for (const sid of existing.sheetOrder) blocks[sid] = existing.sheets[sid].blocks.map(blockOutline)
+    return {
+      ok: true,
+      packetId: existing.id,
+      rev: existing.rev,
+      title: existing.title,
+      template: existing.template,
+      sheetOrder: existing.sheetOrder,
+      blocks,
+      active: true,
+      proofs: await computeProofs(deps, existing),
+    }
+  }
   const template = args.template ?? 'generic'
+  const seedOrigin = args.origin ?? 'human'
   try {
     const id = 'p-' + base32(randomBytes(8), 8)
     const sheetId: SheetId = 's1'
@@ -421,7 +451,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       geometry: {
         paper: 'a4',
         margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
-        targetPages: args.targetPages,
+        targetPages: args.targetPages ?? (template === 'arbeitsblatt' ? 1 : undefined),
       },
       blocks: [],
     }
@@ -440,13 +470,13 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       nextAssetSeq: 1,
       assets: {},
     }
-    // Arbeitsblatt 2-sheet template (M1.5 H2.3): scaffold s1 (Aufgaben) and
-    // s2 (Lösungen) with minimal starter blocks.
+    // Arbeitsblatt 2-sheet template (spec 01 §1, M1.6): scaffold s1 (Arbeitsblatt,
+    // targetPages: 1) and s2 (Erwartungshorizont, unbounded) with minimal starter blocks.
     if (template === 'arbeitsblatt') {
       const s2Id: SheetId = 's2'
       packet.sheets[s2Id] = {
         id: s2Id,
-        title: 'Lösungen',
+        title: 'Erwartungshorizont',
         geometry: { paper: 'a4', margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 } },
         blocks: [],
       }
@@ -462,13 +492,13 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       if (r1) return r1
       const r2 = scaffold(sheetId, { type: 'task', body: 'Erste Aufgabe' })
       if (r2) return r2
-      const r3 = scaffold(s2Id, { type: 'heading', level: 1, body: 'Lösungen' })
+      const r3 = scaffold(s2Id, { type: 'heading', level: 1, body: 'Erwartungshorizont' })
       if (r3) return r3
-      const r4 = scaffold(s2Id, { type: 'answer', body: 'Lösung' })
+      const r4 = scaffold(s2Id, { type: 'answer', body: 'Lösung', dependsOn: [{ id: 'b2', sinceHash: packet.sheets[sheetId].blocks[1].hash, at: new Date().toISOString() }] })
       if (r4) return r4
     }
     for (const raw of args.blocks ?? []) {
-      const { block, error } = buildBlock(packet, raw, 'human')
+      const { block, error } = buildBlock(packet, raw, seedOrigin)
       if (error) return fail(toStoreCode(error), `block ${raw.id ?? '?'}: ${error}`)
       sheet.blocks.push(block)
       packet.nextBlockSeq += 1
@@ -498,7 +528,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       sheetOrder: loaded.sheetOrder,
       blocks,
       active: true,
-      proofs: await computeProofs(deps, loaded, sheetId),
+      proofs: await computeProofs(deps, loaded),
     }
   } catch (e) {
     return mapError(e)
@@ -611,6 +641,7 @@ export interface EditBlockArgs {
   // patch:
   patch?: Record<string, unknown>
   // move:
+  toSheetId?: SheetId
   toBeforeId?: BlockId
   toAfterId?: BlockId
 }
@@ -686,11 +717,12 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
       }
     }
 
-    const needsExpect = args.op === 'patch' || args.op === 'remove' || args.op === 'move'
+    const needsExpect = (args.op === 'patch' || args.op === 'remove' || args.op === 'move') && args.baseHash !== undefined
     let changedId: BlockId | null = null
+    let touchedSheetId: SheetId = args.sheetId
     store.commit(
       pid,
-      needsExpect ? { blockId: args.blockId ?? '', baseHash: args.baseHash ?? '' } : null,
+      needsExpect ? { blockId: args.blockId ?? '', baseHash: args.baseHash! } : null,
       (p) => {
         const sh = p.sheets[args.sheetId]
         switch (args.op) {
@@ -705,11 +737,14 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             return block.id
           }
           case 'patch': {
-            const found = findBlock(p, args.blockId!)
+            if (!args.blockId) throw new StoreError('invalid_op', 'patch requires blockId')
+            const found = findBlock(p, args.blockId)
             if (!found) throw new StoreError('not_found', `block ${args.blockId} not found`)
+            touchedSheetId = found.sheet.id
             const b = found.block as unknown as Record<string, unknown>
+            const now = deps.now ? deps.now() : new Date().toISOString()
             for (const [k, v] of Object.entries(args.patch ?? {})) {
-              if (k === 'body' && typeof v === 'string') {
+              if (k === 'body') {
                 const inlines = toInline(v)
                 if (inlines.length > 0) {
                   const e = validateInline(inlines)
@@ -717,15 +752,31 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
                 }
                 b.body = inlines
               } else if (k === 'slot') {
-                const e = validateSlot(v as LayoutSlot)
+                const slotVal = v as LayoutSlot
+                const e = validateSlot(slotVal)
                 if (e) throw new StoreError(e, 'slot')
-                b.slot = v
-              } else if (k === 'dependsOn' || k === 'slot' || k === 'origin') {
-                b[k] = v
-              } else if (['fields', 'level', 'tone', 'headers', 'rows', 'numbered', 'title'].includes(k)) {
+                if ((found.block.type === 'header' || found.block.type === 'heading') && slotVal.mode !== 'full') {
+                  throw new StoreError('invalid_block', 'header/heading must use full slot')
+                }
+                if (slotVal.asset && !(p.assets && slotVal.asset.id in p.assets)) {
+                  throw new StoreError('asset_not_found', `asset ${slotVal.asset.id} not found`)
+                }
+                b.slot = slotVal
+              } else if (k === 'dependsOn') {
+                if (!Array.isArray(v)) throw new StoreError('invalid_op', 'dependsOn must be an array')
+                b.dependsOn = v.map((item) => {
+                  if (typeof item === 'string') {
+                    const target = findBlock(p, item)
+                    return { id: item, sinceHash: target ? target.block.hash : '', at: now }
+                  }
+                  return item
+                })
+              } else if (['fields', 'level', 'tone', 'headers', 'rows', 'numbered', 'title', 'lineNumbers'].includes(k)) {
                 b[k] = v
               }
             }
+            // If this patch came from a direct human pane edit, human re-claims authorship (spec 01 §7).
+            if (args.origin === 'human') b.origin = 'human'
             // Re-validate after patch.
             if (b.body) {
               const e = validateInline(b.body as Inline[])
@@ -739,21 +790,26 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             if (!id) throw new StoreError('invalid_op', 'move requires blockId')
             const from = findBlock(p, id)
             if (!from) throw new StoreError('not_found', `block ${id} not found`)
-            sh.blocks.splice(from.index, 1)
-            let to = sh.blocks.length
-            if (args.toBeforeId) to = sh.blocks.findIndex((b) => b.id === args.toBeforeId)
+            const targetSheet = p.sheets[args.toSheetId ?? args.sheetId]
+            if (!targetSheet) throw new StoreError('invalid_op', `target sheet not found`)
+            from.sheet.blocks.splice(from.index, 1)
+            let to = targetSheet.blocks.length
+            if (args.toBeforeId) to = targetSheet.blocks.findIndex((b) => b.id === args.toBeforeId)
             if (args.toAfterId) {
-              const i = sh.blocks.findIndex((b) => b.id === args.toAfterId)
-              to = i >= 0 ? i + 1 : sh.blocks.length
+              const i = targetSheet.blocks.findIndex((b) => b.id === args.toAfterId)
+              to = i >= 0 ? i + 1 : targetSheet.blocks.length
             }
-            sh.blocks.splice(to < 0 ? sh.blocks.length : to, 0, from.block)
+            targetSheet.blocks.splice(to < 0 ? targetSheet.blocks.length : to, 0, from.block)
+            touchedSheetId = targetSheet.id
             changedId = id
             return id
           }
           case 'remove': {
-            const found = findBlock(p, args.blockId!)
+            if (!args.blockId) throw new StoreError('invalid_op', 'remove requires blockId')
+            const found = findBlock(p, args.blockId)
             if (!found) throw new StoreError('not_found', `block ${args.blockId} not found`)
-            sh.blocks.splice(found.index, 1)
+            found.sheet.blocks.splice(found.index, 1)
+            touchedSheetId = found.sheet.id
             changedId = found.block.id
             return found.block.id
           }
@@ -767,7 +823,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
     const proof = render
       ? await (async () => {
           try {
-            return toReceipt(await render(loaded.sheets[args.sheetId], loaded, assetBytesForPacket(deps, loaded)), loaded)
+            return toReceipt(await render(loaded.sheets[touchedSheetId], loaded, assetBytesForPacket(deps, loaded)), loaded)
           } catch {
             return null
           }

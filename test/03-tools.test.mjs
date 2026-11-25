@@ -456,3 +456,71 @@ test('error codes: invalid slot / unknown export format are INVALID_PARAMS', asy
   const badFmt = await galleyExport(deps, { packetId: r.packetId, format: 'docx-9000' })
   assert.equal(badFmt.code, Err.INVALID_PARAMS)
 })
+
+test('M1.6 hardening: Inline[] + lineNumbers patch, optional baseHash, cross-sheet move/remove, arbeitsblatt scaffold + id switch', async () => {
+  const ab = await galleyOpen(deps, { template: 'arbeitsblatt', title: 'Brüche' })
+  assert.equal(ab.ok, true)
+  assert.deepEqual(ab.sheetOrder, ['s1', 's2'])
+  assert.ok(ab.proofs.s1 && ab.proofs.s2, 'arbeitsblatt open computes proofs for both s1 and s2')
+  const loadedAb = store.load(ab.packetId)
+  assert.equal(loadedAb.sheets.s1.geometry.targetPages, 1)
+  assert.equal(loadedAb.sheets.s2.title, 'Erwartungshorizont')
+
+  // Patching Inline[] body + lineNumbers WITHOUT baseHash works on agent blocks.
+  const srcIns = await galleyEditBlock(deps, {
+    sheetId: 's1',
+    op: 'insert',
+    origin: 'agent',
+    block: { type: 'source_text', body: 'initial' },
+  })
+  assert.equal(srcIns.ok, true)
+  const srcId = srcIns.block.id
+  const patched = await galleyEditBlock(deps, {
+    sheetId: 's1',
+    op: 'patch',
+    origin: 'agent',
+    blockId: srcId,
+    patch: {
+      title: 'Kurztext',
+      body: [{ t: 'strong', c: [{ t: 'text', v: 'Fett' }] }, { t: 'text', v: ' und klar' }],
+      lineNumbers: { every: 5, start: 1 },
+    },
+  })
+  assert.equal(patched.ok, true)
+  assert.equal(patched.applied, true)
+  const updatedSrc = store.load(ab.packetId).sheets.s1.blocks.find((b) => b.id === srcId)
+  assert.equal(updatedSrc.title, 'Kurztext')
+  assert.equal(updatedSrc.body[0].t, 'strong')
+  assert.deepEqual(updatedSrc.lineNumbers, { every: 5, start: 1 })
+
+  // Cross-sheet move: move srcId from s1 → s2 via toSheetId (without baseHash).
+  const moved = await galleyEditBlock(deps, {
+    sheetId: 's1',
+    toSheetId: 's2',
+    op: 'move',
+    origin: 'agent',
+    blockId: srcId,
+  })
+  assert.equal(moved.ok, true)
+  assert.ok(!store.load(ab.packetId).sheets.s1.blocks.some((b) => b.id === srcId))
+  assert.ok(store.load(ab.packetId).sheets.s2.blocks.some((b) => b.id === srcId))
+
+  // Remove block living on s2 even if caller passed sheetId: 's1' (never corrupts s1).
+  const s1CountBefore = store.load(ab.packetId).sheets.s1.blocks.length
+  const removed = await galleyEditBlock(deps, {
+    sheetId: 's1',
+    op: 'remove',
+    origin: 'agent',
+    blockId: srcId,
+  })
+  assert.equal(removed.ok, true)
+  assert.equal(store.load(ab.packetId).sheets.s1.blocks.length, s1CountBefore)
+  assert.ok(!store.load(ab.packetId).sheets.s2.blocks.some((b) => b.id === srcId))
+
+  // Switch active packet via galleyOpen({ id }).
+  const other = await openPacket([{ type: 'prose', body: 'other' }])
+  assert.equal((await galleyStatus(deps, {})).packetId, other.packetId)
+  const switched = await galleyOpen(deps, { id: ab.packetId })
+  assert.equal(switched.ok, true)
+  assert.equal((await galleyStatus(deps, {})).packetId, ab.packetId)
+})

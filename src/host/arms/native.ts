@@ -51,7 +51,14 @@ export class NativeArm extends BaseArm {
         let msg = 'native compile error'
         try {
           const d = r.takeDiagnostics()
-          if (d && typeof d === 'object' && d.message) msg = String(d.message)
+          if (d && typeof d === 'object') {
+            const shorts = (d as { shortDiagnostics?: Array<{ message?: string }> }).shortDiagnostics
+            if (Array.isArray(shorts) && shorts.length > 0) {
+              msg = shorts.map((s) => s.message ?? '').filter(Boolean).join(' | ') || msg
+            } else if ('message' in d && d.message) {
+              msg = String(d.message)
+            }
+          }
         } catch {
           /* ignore */
         }
