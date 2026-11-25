@@ -1,0 +1,25 @@
+# Secrets / machine pins (never publish)
+ENV.md
+.env
+.env.*
+!.env.local.example
+*.key
+
+# Build / deps
+node_modules/
+dist/
+*.log
+.DS_Store
+.idea/
+
+# Session leftovers / long-horizon inject
+**/.dsh-session
+.dsh/
+STATUS.md
+
+# Local agent working set, skills, specs & scratch (never published)
+agent/
+agents/
+.agents/
+plan/
+operator/
