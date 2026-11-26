@@ -545,3 +545,52 @@ test('M3.1 P2 & zero-skill packaging: GFM pipe tables + full header/task in md e
     rmSync(subWs, { recursive: true, force: true })
   }
 })
+
+test('Built-in `verlaufsplan` template: A4 Landscape, teacher header (no Name line), 6-col table with Ziel + empty Notizen column', async () => {
+  const subWs = mkdtempSync(join(tmpdir(), 'galley-m31-vp-'))
+  try {
+    const { deps } = makeDeps(subWs)
+    const opened = await galleyOpen(deps, {
+      template: 'verlaufsplan',
+      title: 'Verlaufsplan — Der Westfälische Friede 1648',
+    })
+    assert.equal(opened.ok, true)
+    assert.deepEqual(opened.sheetOrder, ['s1'])
+    const pr = opened.proofs.s1
+    assert.ok(pr && pr.pages === 1 && pr.perPage[0].wPt > 800, 'verlaufsplan must render 1p Landscape A4')
+    assert.equal(pr.targetPages, 1)
+    assert.equal(pr.targetPagesMet, true)
+
+    const loaded = deps.store.load(opened.packetId)
+    const s1 = loaded.sheets.s1
+    assert.equal(s1.geometry.orientation, 'landscape')
+    assert.equal(s1.blocks.length, 2)
+    assert.equal(s1.blocks[0].type, 'header')
+    assert.equal(s1.blocks[0].fields.titel, 'Verlaufsplan — Der Westfälische Friede 1648')
+    assert.equal('name' in s1.blocks[0].fields, false, 'teacher-only Verlaufsplan header must omit student name line')
+
+    const tbl = s1.blocks[1]
+    assert.equal(tbl.type, 'table')
+    const headerTexts = tbl.headers.map((cell) => cell.map((i) => i.v).join(''))
+    assert.deepEqual(headerTexts, [
+      'Zeit',
+      'Phase',
+      'Ablauf (Lehrer / Schüler)',
+      'Material',
+      'Ziel',
+      'Notizen',
+    ])
+    assert.equal(tbl.colWidths.length, 6)
+    assert.equal(tbl.rows.length, 4)
+    for (const row of tbl.rows) {
+      assert.equal(row.length, 6)
+      assert.equal(row[5].map((i) => i.v).join(''), '', '6th column (Notizen) starts empty for handwritten teacher notes')
+    }
+
+    const pdfRes = await galleyExport(deps, { packetId: opened.packetId, format: 'pdf' })
+    assert.equal(pdfRes.ok, true)
+    assert.ok(pdfRes.bytes.subarray(0, 5).toString('latin1') === '%PDF-')
+  } finally {
+    rmSync(subWs, { recursive: true, force: true })
+  }
+})

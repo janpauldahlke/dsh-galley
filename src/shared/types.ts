@@ -184,7 +184,7 @@ export type ReviewMode = 'auto' | 'review'
 
 export interface GalleyPacket {
   id: PacketId
-  /** Built-in ('arbeitsblatt' | 'rfc' | 'generic') or custom/Cordis template id. */
+  /** Built-in ('arbeitsblatt' | 'verlaufsplan' | 'rfc' | 'generic') or custom/Cordis template id. */
   template: string
   title: string
   /** 'auto' (default): agent patches on human blocks propose; 'review': ALL agent ops propose. */

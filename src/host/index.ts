@@ -270,7 +270,9 @@ export function registerGalleyTools(ctx: Context): () => void {
         id: { type: 'string', description: 'Switch active packet to an existing packetId (exclusive with create fields).' },
         template: {
           type: 'string',
-          description: 'Built-in ("arbeitsblatt" | "rfc" | "generic") or custom/plugin template id.',
+          description:
+            'Built-in ("arbeitsblatt" | "verlaufsplan" | "rfc" | "generic") or custom/plugin template id. ' +
+            '"verlaufsplan" opens A4 landscape with teacher header + 6-col table [Zeit, Phase, Ablauf (Lehrer / Schüler), Material, Ziel, Notizen] (keep "Notizen" cells empty "" for handwritten teacher notes).',
         },
         title: { type: 'string' },
         orientation: { type: 'string', enum: ['portrait', 'landscape'] },

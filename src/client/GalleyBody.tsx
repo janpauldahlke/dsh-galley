@@ -294,9 +294,11 @@ export function GalleyBody(props: {
         ? bp.title
         : templateId === 'arbeitsblatt'
           ? 'Arbeitsblatt'
-          : templateId === 'rfc'
-            ? 'Engineering RFC'
-            : 'Dokument'
+          : templateId === 'verlaufsplan'
+            ? 'Verlaufsplan'
+            : templateId === 'rfc'
+              ? 'Engineering RFC'
+              : 'Dokument'
     localRevRef.current = null
     const res = await postJson(
       EDIT_ROUTE,
@@ -1059,7 +1061,7 @@ export function GalleyBody(props: {
                 style={{
                   ...headerBtn,
                   padding: '8px 12px',
-                  fontWeight: tpl.id === 'arbeitsblatt' ? 600 : 400,
+                  fontWeight: tpl.id === 'arbeitsblatt' || tpl.id === 'verlaufsplan' ? 600 : 400,
                 }}
               >
                 {tpl.source === 'workspace' ? '★ ' : tpl.source === 'plugin' ? '◆ ' : ''}

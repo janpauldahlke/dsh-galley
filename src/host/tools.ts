@@ -682,7 +682,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
         packet.sheetOrder.push(sid)
         packet.sheets[sid] = {
           id: sid,
-          title: bs.title || `Sheet ${idx + 1}`,
+          title: (idx === 0 && bpSheets.length === 1 && args.title) ? args.title : (bs.title || `Sheet ${idx + 1}`),
           geometry: {
             ...JSON.parse(JSON.stringify(bs.geometry)),
             ...(idx === 0 && args.orientation ? { orientation: args.orientation } : {}),

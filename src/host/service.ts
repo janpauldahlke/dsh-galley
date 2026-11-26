@@ -52,6 +52,41 @@ export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
     ],
   },
   {
+    id: 'verlaufsplan',
+    title: 'Verlaufsplan',
+    description: 'Unterrichtsverlaufsplan im A4-Querformat (Zeit · Phase · Ablauf · Material · Ziel · Notizen)',
+    source: 'builtin',
+    sheets: [
+      {
+        id: 's1',
+        title: 'Verlaufsplan',
+        geometry: {
+          paper: 'a4',
+          orientation: 'landscape',
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+          targetPages: 1,
+        },
+        starterBlocks: [
+          {
+            type: 'header',
+            fields: { titel: 'Verlaufsplan', fach: '', klasse: '', datum: '' },
+          },
+          {
+            type: 'table',
+            colWidths: ['9%', '12%', '34%', '13%', '17%', '15%'],
+            headers: ['Zeit', 'Phase', 'Ablauf (Lehrer / Schüler)', 'Material', 'Ziel', 'Notizen'],
+            rows: [
+              ['0–5 min', 'Einstieg', '', '', '', ''],
+              ['5–25 min', 'Erarbeitung', '', '', '', ''],
+              ['25–40 min', 'Sicherung', '', '', '', ''],
+              ['40–45 min', 'Abschluss', '', '', '', ''],
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     id: 'rfc',
     title: 'Engineering RFC',
     description: 'Technischer Entwurfsbogen für Architektur- und Spezifikationsdokumente',

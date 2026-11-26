@@ -523,7 +523,7 @@ export class GalleyStore {
       .trim()
       .replace(/[\s_]+/g, '-')
       .toLowerCase() || 'vorlage'
-    const reserved = new Set(['arbeitsblatt', 'rfc', 'generic'])
+    const reserved = new Set(['arbeitsblatt', 'verlaufsplan', 'rfc', 'generic'])
     const id = reserved.has(rawSlug) ? `${rawSlug}-vorlage` : rawSlug
 
     const blueprint: GalleyTemplateBlueprint = {
