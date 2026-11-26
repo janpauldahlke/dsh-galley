@@ -89,7 +89,7 @@ instant local **Typst** page typesetting and deterministic exporters.
 `dsh-galley` is intentionally **domain-neutral and English-first** (`src/shared/i18n.ts` keeps `en` active with `de` stubbed for printed document labels):
 
 - Core ships only foundation templates (`worksheet` Problem Sheet + Answer Key, `rfc` Engineering RFC, `generic` Blank Document) so academics, engineers, writers, and educators share an uncluttered workbench.
-- Domain-specific packs (e.g. `dsh-galley-didaktik` for German teaching sheets *Arbeitsblatt*, *Verlaufsplan*, *Quellensammlung*, or `dsh-galley-academic` for research handouts/preprints) live in separate lightweight Cordis leaf bundles calling `ctx.galley.registerTemplate(...)` and `ctx.galley.registerPreflight(...)`.
+- Domain-specific packs (e.g. `dsh-galley-templates` with selectable `packs: ['teaching-de' | 'academic']` for German teaching sheets *Arbeitsblatt*, *Verlaufsplan*, *Quellensammlung* or English research handouts/matrices) live in separate lightweight Cordis leaf bundles calling `ctx.galley.registerTemplate(...)` and `ctx.galley.registerPreflight(...)`.
 
 ---
 
@@ -108,6 +108,7 @@ CJS `__ModuleLoader__` Client + standalone testable `.mjs` modules for
 | [`dsh-memento`](https://github.com/janpauldahlke/dsh-memento)                       | Human-curated bounded session memory                  |
 | [`dsh-local-long-horizon`](https://github.com/janpauldahlke/dsh-local-long-horizon) | Host-owned multi-step task status board               |
 | `dsh-galley`                                                                        | Shared volatile document workbench & Typst typesetter |
+| `dsh-galley-templates`                                                              | Selectable domain template packs (`teaching-de`, `academic`, …) via `ctx.galley` |
 
 ---
 
