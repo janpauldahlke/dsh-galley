@@ -369,3 +369,70 @@ test('Download route + path-traversal guard + ctx.galley Cordis service (templat
   assert.equal(stAfterDispose.templates.some((t) => t.id === 'notenliste'), false)
   assert.equal(stAfterDispose.preflight.some((w) => w.code === 'FUNDUS_UNCITED_CLAIM'), false)
 })
+
+test('M2.6 dogfood regressions: table cell shape normalization + insert string dependsOn + patch auto-unstale', async () => {
+  const opened = await postJson('/api/galley/edit', {
+    op: 'open',
+    template: 'arbeitsblatt',
+    title: 'Dreißigjähriger Krieg',
+  })
+  assert.equal(opened.status, 200)
+
+  // 1. Insert answer on s2 with string dependsOn: ["b2"] -> must NOT be stale on creation!
+  const insAns = await postJson('/api/galley/edit', {
+    op: 'insert',
+    sheetId: 's2',
+    source: 'agent',
+    block: {
+      type: 'answer',
+      body: [{ t: 'text', v: 'Initiale Lösung' }],
+      dependsOn: ['b2'],
+    },
+  })
+  assert.equal(insAns.status, 200)
+  const ansId = insAns.json.block.id
+  assert.equal(insAns.json.block.stale, false, 'newly inserted answer with string dependsOn must not start stale')
+  assert.equal(insAns.json.staleDependents.includes(ansId), false)
+
+  // 2. Patch upstream task b2 -> ansId turns stale; then patch ansId body -> ansId auto-clears stale!
+  const patchTask = await postJson('/api/galley/edit', {
+    op: 'patch',
+    blockId: 'b2',
+    source: 'agent',
+    patch: { body: 'Aktualisierte Aufgabe zu 1618' },
+  })
+  assert.equal(patchTask.status, 200)
+  assert.ok(patchTask.json.staleDependents.includes(ansId), 'downstream answer must turn stale after task edit')
+
+  const patchAns = await postJson('/api/galley/edit', {
+    op: 'patch',
+    blockId: ansId,
+    source: 'agent',
+    patch: { body: 'Aktualisierte Lösung passend zu 1618' },
+  })
+  assert.equal(patchAns.status, 200)
+  assert.equal(patchAns.json.block.stale, false, 'patching stale answer body must refresh sinceHash and clear stale')
+  assert.equal(patchAns.json.staleDependents.includes(ansId), false)
+
+  // 3. Insert table with mixed LLM cell shapes (plain strings, bare Inline objects, and Inline[] arrays)
+  const tblRes = await postJson('/api/galley/edit', {
+    op: 'insert',
+    sheetId: 's1',
+    source: 'agent',
+    block: {
+      type: 'table',
+      headers: ['Zeit', { t: 'text', v: 'Phase' }, [{ t: 'text', v: 'Inhalt' }]],
+      rows: [
+        [
+          '15 Min.',
+          { t: 'strong', c: [{ t: 'text', v: 'Einstieg' }] },
+          [{ t: 'text', v: 'Prager Fenstersturz' }],
+        ],
+      ],
+    },
+  })
+  assert.equal(tblRes.status, 200)
+  assert.equal(tblRes.json.ok, true)
+  assert.ok(tblRes.json.proof && tblRes.json.proof.pages >= 1, 'normalized table must compile cleanly on NativeArm')
+})
+

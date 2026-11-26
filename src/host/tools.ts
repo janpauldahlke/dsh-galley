@@ -171,6 +171,9 @@ export function mapError(error: unknown): ToolFailure {
 /** Flatten an inline run to plain text (strong/emph recurse; others join). */
 export function inlineText(inlines: Inline[] | undefined): string {
   if (!inlines) return ''
+  if (!Array.isArray(inlines)) {
+    return isInlineObject(inlines) ? inlineText([inlines]) : typeof inlines === 'string' ? inlines : ''
+  }
   return inlines
     .map((i) => {
       switch (i.t) {
@@ -302,6 +305,111 @@ function toInline(body: unknown): Inline[] {
   return [{ t: 'text', v: body === undefined || body === null ? '' : String(body) }]
 }
 
+function isInlineObject(x: unknown): x is Inline {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false
+  const t = (x as Record<string, unknown>).t
+  return (
+    t === 'text' ||
+    t === 'strong' ||
+    t === 'emph' ||
+    t === 'code' ||
+    t === 'cloze' ||
+    t === 'math' ||
+    t === 'newline'
+  )
+}
+
+/**
+ * Normalize a single table cell from any natural LLM/caller shape:
+ * - `"plain text"` -> `[{ t: 'text', v: "plain text" }]`
+ * - `{ t: 'text', v: '...' }` (single Inline node) -> `[node]`
+ * - `Inline[]` (or mixed string/Inline array) -> validated `Inline[]`
+ */
+function normalizeTableCell(rawCell: unknown): { cell: Inline[]; error: string | null } {
+  if (rawCell === null || rawCell === undefined) return { cell: [], error: null }
+  if (typeof rawCell === 'string') return { cell: [{ t: 'text', v: rawCell }], error: null }
+  if (isInlineObject(rawCell)) {
+    const e = validateInline([rawCell])
+    return e ? { cell: [], error: e } : { cell: [rawCell], error: null }
+  }
+  if (Array.isArray(rawCell)) {
+    const out: Inline[] = []
+    for (const item of rawCell) {
+      if (typeof item === 'string') out.push({ t: 'text', v: item })
+      else if (isInlineObject(item)) out.push(item)
+      else return { cell: [], error: 'invalid_block' }
+    }
+    if (out.length > 0) {
+      const e = validateInline(out)
+      if (e) return { cell: [], error: e }
+    }
+    return { cell: out, error: null }
+  }
+  return { cell: [], error: 'invalid_block' }
+}
+
+function normalizeTableHeaders(rawHeaders: unknown): { headers: Inline[][]; error: string | null } {
+  if (rawHeaders === undefined || rawHeaders === null) return { headers: [], error: null }
+  if (!Array.isArray(rawHeaders)) return { headers: [], error: 'invalid_block' }
+  const headers: Inline[][] = []
+  for (const c of rawHeaders) {
+    const res = normalizeTableCell(c)
+    if (res.error) return { headers: [], error: res.error }
+    headers.push(res.cell)
+  }
+  return { headers, error: null }
+}
+
+function normalizeTableRows(rawRows: unknown): { rows: Inline[][][]; error: string | null } {
+  if (rawRows === undefined || rawRows === null) return { rows: [], error: null }
+  if (!Array.isArray(rawRows)) return { rows: [], error: 'invalid_block' }
+  const rows: Inline[][][] = []
+  for (const rawRow of rawRows) {
+    if (!Array.isArray(rawRow)) return { rows: [], error: 'invalid_block' }
+    const row: Inline[][] = []
+    for (const c of rawRow) {
+      const res = normalizeTableCell(c)
+      if (res.error) return { rows: [], error: res.error }
+      row.push(res.cell)
+    }
+    rows.push(row)
+  }
+  return { rows, error: null }
+}
+
+/**
+ * Normalize `dependsOn` items (accepts string blockIds `["b2"]` OR `{ id, sinceHash?, at? }`
+ * objects) so both `insert` and `patch` anchor `sinceHash` to the target block's current hash.
+ */
+function normalizeDependsOn(
+  packet: GalleyPacket,
+  rawDeps: unknown,
+  now: string,
+): { deps: Block['dependsOn']; error: string | null } {
+  if (rawDeps === undefined || rawDeps === null) return { deps: [], error: null }
+  if (!Array.isArray(rawDeps)) return { deps: [], error: 'invalid_op' }
+  const deps: Block['dependsOn'] = []
+  for (const item of rawDeps) {
+    if (typeof item === 'string') {
+      const target = findBlock(packet, item)
+      deps.push({ id: item, sinceHash: target ? target.block.hash : '', at: now })
+    } else if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).id === 'string') {
+      const d = item as { id: string; sinceHash?: string; at?: string }
+      const target = findBlock(packet, d.id)
+      const sinceHash =
+        typeof d.sinceHash === 'string' && d.sinceHash.length > 0
+          ? d.sinceHash
+          : target
+            ? target.block.hash
+            : ''
+      deps.push({ id: d.id, sinceHash, at: typeof d.at === 'string' ? d.at : now })
+    } else {
+      return { deps: [], error: 'invalid_op' }
+    }
+  }
+  return { deps, error: null }
+}
+
 /** Build a fully-formed Block from raw input (assigns id, defaults, hash). */
 export function buildBlock(
   packet: GalleyPacket,
@@ -332,15 +440,19 @@ export function buildBlock(
     if (e) return { block: null as unknown as Block, error: e }
   }
 
+  const now = new Date().toISOString()
+  const normDeps = normalizeDependsOn(packet, raw.dependsOn, now)
+  if (normDeps.error) return { block: null as unknown as Block, error: normDeps.error }
+
   const id = (raw.id as BlockId) || allocateBlockId(packet)
   const base: Record<string, unknown> = {
     id,
     type,
     hash: '',
-    dependsOn: (raw.dependsOn as unknown[]) ?? [],
+    dependsOn: normDeps.deps,
     slot,
     origin,
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
     stale: null,
   }
   switch (type) {
@@ -362,10 +474,15 @@ export function buildBlock(
       base.body = bodyInlines
       base.lineNumbers = raw.lineNumbers
       break
-    case 'table':
-      base.headers = (raw.headers as Inline[][]) ?? []
-      base.rows = (raw.rows as Inline[][][]) ?? []
+    case 'table': {
+      const hRes = normalizeTableHeaders(raw.headers)
+      if (hRes.error) return { block: null as unknown as Block, error: hRes.error }
+      const rRes = normalizeTableRows(raw.rows)
+      if (rRes.error) return { block: null as unknown as Block, error: rRes.error }
+      base.headers = hRes.headers
+      base.rows = rRes.rows
       break
+    }
     case 'callout':
       base.tone = (raw.tone as 'info' | 'hint' | 'warning') ?? 'info'
       base.body = bodyInlines
@@ -909,7 +1026,9 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             touchedSheetId = found.sheet.id
             const b = found.block as unknown as Record<string, unknown>
             const now = deps.now ? deps.now() : new Date().toISOString()
-            for (const [k, v] of Object.entries(args.patch ?? {})) {
+            const patchInput = args.patch ?? {}
+            let contentTouched = false
+            for (const [k, v] of Object.entries(patchInput)) {
               if (k === 'body') {
                 const inlines = toInline(v)
                 if (inlines.length > 0) {
@@ -917,6 +1036,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
                   if (e) throw new StoreError(e, 'inline limit')
                 }
                 b.body = inlines
+                contentTouched = true
               } else if (k === 'slot') {
                 const slotVal = v as LayoutSlot
                 const e = validateSlot(slotVal)
@@ -929,17 +1049,31 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
                 }
                 b.slot = slotVal
               } else if (k === 'dependsOn') {
-                if (!Array.isArray(v)) throw new StoreError('invalid_op', 'dependsOn must be an array')
-                b.dependsOn = v.map((item) => {
-                  if (typeof item === 'string') {
-                    const target = findBlock(p, item)
-                    return { id: item, sinceHash: target ? target.block.hash : '', at: now }
-                  }
-                  return item
-                })
-              } else if (['fields', 'level', 'tone', 'headers', 'rows', 'numbered', 'title', 'lineNumbers'].includes(k)) {
+                const norm = normalizeDependsOn(p, v, now)
+                if (norm.error) throw new StoreError(norm.error, 'dependsOn must be a valid array')
+                b.dependsOn = norm.deps
+              } else if (k === 'headers') {
+                const hRes = normalizeTableHeaders(v)
+                if (hRes.error) throw new StoreError(hRes.error, 'invalid table headers')
+                b.headers = hRes.headers
+                contentTouched = true
+              } else if (k === 'rows') {
+                const rRes = normalizeTableRows(v)
+                if (rRes.error) throw new StoreError(rRes.error, 'invalid table rows')
+                b.rows = rRes.rows
+                contentTouched = true
+              } else if (['fields', 'level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
                 b[k] = v
+                contentTouched = true
               }
+            }
+            // Refresh outgoing `dependsOn` `sinceHash` edges when a dependent block's
+            // own content is updated (so updating a stale answer clears its stale flag).
+            if (contentTouched && !('dependsOn' in patchInput) && Array.isArray(b.dependsOn) && b.dependsOn.length > 0) {
+              b.dependsOn = (b.dependsOn as Block['dependsOn']).map((d) => {
+                const originBlk = findBlock(p, d.id)
+                return originBlk ? { id: d.id, sinceHash: originBlk.block.hash, at: now } : d
+              })
             }
             if (args.origin === 'human') b.origin = 'human'
             if (b.body) {

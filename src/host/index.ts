@@ -413,7 +413,15 @@ export function registerGalleyTools(ctx: Context): () => void {
           ...(args as unknown as Parameters<typeof galleyExport>[1]),
           outDir: deps.cwd,
         }
-        return await galleyExport(deps, exportArgs)
+        const res = await galleyExport(deps, exportArgs)
+        // DSH validates lossless JSON on the raw return value of `execute()` BEFORE
+        // `output.render` runs — strip raw Node `Buffer` (`bytes`) since `files[]`
+        // already carries the written `galley-exports/…` deliverable paths.
+        if (res.ok && 'bytes' in res) {
+          const { bytes: _omit, ...jsonSafe } = res
+          return jsonSafe
+        }
+        return res
       } catch (error) {
         return toolErrorResult(error)
       }

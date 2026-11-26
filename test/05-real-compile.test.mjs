@@ -259,7 +259,9 @@ test('§4 gate: host registerGalleyTools wires assetBytes + locks LLM origin/aut
       assert.ok(edited.proof && edited.proof.pages >= 1, 'host getDeps() must forward assetBytes so media slots compile!')
       const pdfExport = await registered.get('galley_export').execute({ packetId: opened.packetId, format: 'pdf' })
       assert.equal(pdfExport.ok, true)
-      assert.equal(Buffer.from(pdfExport.bytes.slice(0, 5)).toString('latin1'), '%PDF-')
+      assert.equal(pdfExport.bytes, undefined, 'execute() return value must be pure lossless JSON without Buffer')
+      assert.ok(Array.isArray(pdfExport.files) && pdfExport.files.length === 1)
+      assert.deepEqual(JSON.parse(JSON.stringify(pdfExport)), pdfExport)
       store.delete(opened.packetId)
     } finally {
       if (prevRoot === undefined) delete process.env.GALLEY_ROOT
