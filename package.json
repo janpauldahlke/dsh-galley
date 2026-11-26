@@ -24,9 +24,13 @@
   "bugs": {
     "url": "https://github.com/janpauldahlke/dsh-galley/issues"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node build.mjs && tsc --noEmit",
     "prepare": "node build.mjs",
+    "prepublishOnly": "npm run build && npm test",
     "test": "node build.mjs && node --test \"test/**/*.test.mjs\""
   },
   "keywords": [

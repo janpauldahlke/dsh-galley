@@ -310,11 +310,12 @@ export function validateInline(inlines: Inline[]): string | null {
   return null
 }
 
-/** Normalize a raw block body (string or Inline[]) into Inline[]. */
+/** Normalize a raw block body (mini-markup string or Inline[]) into Inline[]. */
 function toInline(body: unknown): Inline[] {
-  if (typeof body === 'string') return [{ t: 'text', v: body }]
+  if (typeof body === 'string') return parseInlines(body)
   if (Array.isArray(body)) return body as Inline[]
-  return [{ t: 'text', v: body === undefined || body === null ? '' : String(body) }]
+  if (isInlineObject(body)) return [body]
+  return parseInlines(body === undefined || body === null ? '' : String(body))
 }
 
 function isInlineObject(x: unknown): x is Inline {

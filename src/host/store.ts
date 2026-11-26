@@ -45,6 +45,7 @@ import type {
   PageGeometry,
   ReviewMode,
 } from '../shared/types.ts'
+import { parseInlines } from '../shared/inlineMarkup.ts'
 
 export const UNDO_DEPTH = 50
 export const JOURNAL_KEEP = 3
@@ -841,7 +842,7 @@ export class GalleyStore {
       const b = located.block as unknown as Record<string, unknown>
       for (const [k, v] of Object.entries(proposal.proposedPatch)) {
         if (k === 'body') {
-          b.body = typeof v === 'string' ? [{ t: 'text', v }] : Array.isArray(v) ? v : [{ t: 'text', v: String(v) }]
+          b.body = typeof v === 'string' ? parseInlines(v) : Array.isArray(v) ? v : parseInlines(String(v))
         } else if (k !== 'origin' && k !== 'id' && k !== 'hash') {
           b[k] = v
         }
