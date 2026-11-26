@@ -1,7 +1,8 @@
 /**
  * Fahnenabzug (Proof View) — renders host-compiled Typst SVGs inline per page
- * with page geometry footers, block-to-page jump chips, target-page budget
- * controls, and the Spec 04 §3 amber overflow strip. Zero client Typst imports.
+ * with sheet CRUD (+ Bogen, Rename, Remove, Portrait/Landscape orientation),
+ * target-page budget controls, block-to-page jump chips, and the Spec 04 §3
+ * amber overflow strip. Zero client Typst compiler imports.
  */
 import { useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
@@ -18,9 +19,14 @@ export interface ProofViewProps {
   proofs: StateProofView[]
   selectedSheetId: SheetId
   selectedBlockId: BlockId | null
+  busy?: boolean
   onSelectSheet: (sheetId: SheetId) => void
   onSelectBlock: (blockId: BlockId) => void
   onUpdateTargetPages: (sheetId: SheetId, targetPages: number | null) => void
+  onUpdateOrientation: (sheetId: SheetId, orientation: 'portrait' | 'landscape') => void
+  onAddSheet: (title?: string) => void
+  onRenameSheet: (sheetId: SheetId, title: string) => void
+  onRemoveSheet: (sheetId: SheetId) => void
 }
 
 type ZoomLevel = 'fit' | 75 | 100 | 125
@@ -54,12 +60,19 @@ export function ProofView(props: ProofViewProps): ReactNode {
     proofs,
     selectedSheetId,
     selectedBlockId,
+    busy,
     onSelectSheet,
     onSelectBlock,
     onUpdateTargetPages,
+    onUpdateOrientation,
+    onAddSheet,
+    onRenameSheet,
+    onRemoveSheet,
   } = props
 
   const [zoom, setZoom] = useState<ZoomLevel>('fit')
+  const [renamingSheet, setRenamingSheet] = useState(false)
+  const [sheetTitleDraft, setSheetTitleDraft] = useState('')
 
   const activeSheet = sheets.find((s) => s.id === selectedSheetId) ?? sheets[0]
   const activeProof = proofs.find((p) => p.sheetId === activeSheet?.id)
@@ -86,10 +99,11 @@ export function ProofView(props: ProofViewProps): ReactNode {
       : null
 
   const targetPages = activeSheet?.geometry?.targetPages
+  const orientation = activeSheet?.geometry?.orientation ?? 'portrait'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Sheet switcher + Target pages + Zoom */}
+      {/* Sheet switcher + Sheet CRUD + Orientation + Target pages + Zoom */}
       <div style={toolbarStyle}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
           {sheets.map((sh) => {
@@ -100,7 +114,11 @@ export function ProofView(props: ProofViewProps): ReactNode {
               <button
                 key={sh.id}
                 type="button"
-                onClick={() => onSelectSheet(sh.id)}
+                data-testid={`galley-sheet-tab-${sh.id}`}
+                onClick={() => {
+                  setRenamingSheet(false)
+                  onSelectSheet(sh.id)
+                }}
                 style={{
                   ...pillBtn(active),
                   borderColor: hasOverflow ? '#d97706' : 'rgba(128,128,128,0.32)',
@@ -111,38 +129,134 @@ export function ProofView(props: ProofViewProps): ReactNode {
               </button>
             )
           })}
-        </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          {activeSheet && (
-            <label
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, opacity: 0.85 }}
-              title="Zielseitenzahl (targetPages) für Überlauf-Prüfung"
-            >
-              <span>Ziel:</span>
-              <select
-                aria-label="Zielseiten"
-                value={targetPages === undefined ? '' : String(targetPages)}
-                onChange={(e) => {
-                  const v = e.target.value
-                  onUpdateTargetPages(activeSheet.id, v === '' ? null : Number(v))
+          <button
+            type="button"
+            data-testid="galley-add-sheet-btn"
+            title="Neuen Bogen hinzufügen"
+            disabled={busy}
+            onClick={() => onAddSheet()}
+            style={pillBtn(false)}
+          >
+            + Bogen
+          </button>
+
+          {activeSheet && !renamingSheet && (
+            <>
+              <button
+                type="button"
+                title="Aktuellen Bogen umbenennen"
+                onClick={() => {
+                  setSheetTitleDraft(activeSheet.title)
+                  setRenamingSheet(true)
+                }}
+                style={pillBtn(false)}
+              >
+                ✎
+              </button>
+              {sheets.length > 1 && (
+                <button
+                  type="button"
+                  data-testid="galley-remove-sheet-btn"
+                  title="Aktuellen Bogen löschen"
+                  disabled={busy}
+                  onClick={() => onRemoveSheet(activeSheet.id)}
+                  style={pillBtn(false)}
+                >
+                  ✕
+                </button>
+              )}
+            </>
+          )}
+
+          {activeSheet && renamingSheet && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+              <input
+                aria-label="Bogentitel"
+                value={sheetTitleDraft}
+                onChange={(e) => setSheetTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && sheetTitleDraft.trim()) {
+                    setRenamingSheet(false)
+                    onRenameSheet(activeSheet.id, sheetTitleDraft.trim())
+                  } else if (e.key === 'Escape') {
+                    setRenamingSheet(false)
+                  }
                 }}
                 style={{
                   color: 'inherit',
                   background: 'transparent',
-                  border: '1px solid rgba(128,128,128,0.32)',
+                  border: '1px solid rgba(128,128,128,0.4)',
                   borderRadius: 4,
+                  padding: '1px 5px',
                   fontSize: 11,
-                  padding: '1px 4px',
+                  width: 110,
                 }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (sheetTitleDraft.trim()) {
+                    setRenamingSheet(false)
+                    onRenameSheet(activeSheet.id, sheetTitleDraft.trim())
+                  }
+                }}
+                style={pillBtn(true)}
               >
-                <option value="" style={{ color: '#111' }}>∞ frei</option>
-                <option value="1" style={{ color: '#111' }}>1 Seite</option>
-                <option value="2" style={{ color: '#111' }}>2 Seiten</option>
-                <option value="3" style={{ color: '#111' }}>3 Seiten</option>
-                <option value="4" style={{ color: '#111' }}>4 Seiten</option>
-              </select>
-            </label>
+                ✓
+              </button>
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          {activeSheet && (
+            <>
+              <button
+                type="button"
+                data-testid="galley-orientation-btn"
+                title="Seitenausrichtung umschalten (Hochformat / Querformat)"
+                disabled={busy}
+                onClick={() =>
+                  onUpdateOrientation(
+                    activeSheet.id,
+                    orientation === 'landscape' ? 'portrait' : 'landscape',
+                  )
+                }
+                style={pillBtn(orientation === 'landscape')}
+              >
+                {orientation === 'landscape' ? '▭ Quer' : '▯ Hoch'}
+              </button>
+
+              <label
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, opacity: 0.85 }}
+                title="Zielseitenzahl (targetPages) für Überlauf-Prüfung"
+              >
+                <span>Ziel:</span>
+                <select
+                  aria-label="Zielseiten"
+                  value={targetPages === undefined ? '' : String(targetPages)}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    onUpdateTargetPages(activeSheet.id, v === '' ? null : Number(v))
+                  }}
+                  style={{
+                    color: 'inherit',
+                    background: 'transparent',
+                    border: '1px solid rgba(128,128,128,0.32)',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    padding: '1px 4px',
+                  }}
+                >
+                  <option value="" style={{ color: '#111' }}>∞ frei</option>
+                  <option value="1" style={{ color: '#111' }}>1 Seite</option>
+                  <option value="2" style={{ color: '#111' }}>2 Seiten</option>
+                  <option value="3" style={{ color: '#111' }}>3 Seiten</option>
+                  <option value="4" style={{ color: '#111' }}>4 Seiten</option>
+                </select>
+              </label>
+            </>
           )}
 
           <div style={{ display: 'inline-flex', gap: 2 }}>
@@ -180,7 +294,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
             data-testid="galley-compile-error"
             style={{
               width: '100%',
-              maxWidth: 560,
+              maxWidth: 620,
               boxSizing: 'border-box',
               padding: '10px 12px',
               borderRadius: 6,
@@ -216,6 +330,8 @@ export function ProofView(props: ProofViewProps): ReactNode {
         {decodedPages.map((svgMarkup, idx) => {
           const total = activeProof?.pages ?? decodedPages.length
           const dims = activeProof?.perPage?.[idx] ?? { wPt: 595, hPt: 842 }
+          const isLandscapePage = dims.wPt > dims.hPt
+          const baseMaxWidth = isLandscapePage ? 680 : 560
           const isLastPage = idx === total - 1
           const overflowText = isLastPage
             ? formatOverflowBanner(activeProof?.overflowLinesOnLastPage ?? 0, targetPages)
@@ -225,8 +341,8 @@ export function ProofView(props: ProofViewProps): ReactNode {
 
           const widthStyle: CSSProperties =
             zoom === 'fit'
-              ? { width: '100%', maxWidth: 560 }
-              : { width: `${Math.round((560 * zoom) / 100)}px`, maxWidth: 'none' }
+              ? { width: '100%', maxWidth: baseMaxWidth }
+              : { width: `${Math.round((baseMaxWidth * zoom) / 100)}px`, maxWidth: 'none' }
 
           return (
             <div

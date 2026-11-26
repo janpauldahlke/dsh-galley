@@ -11,6 +11,7 @@ export const HEALTH_ROUTE = '/api/galley/health'
 export const STATE_ROUTE = '/api/galley/state'
 export const EDIT_ROUTE = '/api/galley/edit'
 export const EXPORT_ROUTE = '/api/galley/export'
+export const DOWNLOAD_ROUTE = '/api/galley/download'
 export const PROPOSAL_ROUTE_PREFIX = '/api/galley/proposal'
 
 export const TAB_ID = 'galley'
@@ -29,6 +30,8 @@ export type AssetId = string    // a1, a2, … — packet-scoped media
 
 export interface PageGeometry {
   paper: 'a4' | 'letter'
+  /** Default 'portrait'; 'landscape' emits Typst `flipped: true`. */
+  orientation?: 'portrait' | 'landscape'
   /** cm, per side. */
   margin: { top: number; right: number; bottom: number; left: number }
   /** Fit target (e.g. 1 for a one-page worksheet); undefined = unbounded. */
@@ -175,11 +178,16 @@ export interface GalleySheet {
   blocks: Block[]
 }
 
+export type ReviewMode = 'auto' | 'review'
+
 export interface GalleyPacket {
   id: PacketId
-  template: 'arbeitsblatt' | 'rfc' | 'generic'
+  /** Built-in ('arbeitsblatt' | 'rfc' | 'generic') or custom/Cordis template id. */
+  template: string
   title: string
-  /** monotonically increasing; +1 per committed change (incl. undo). */
+  /** 'auto' (default): agent patches on human blocks propose; 'review': ALL agent ops propose. */
+  reviewMode?: ReviewMode
+  /** monotonically increasing; +1 per committed change (incl. undo/redo/proposals). */
   rev: number
   createdAt: string
   updatedAt: string
@@ -192,6 +200,27 @@ export interface GalleyPacket {
   nextAssetSeq: number
   /** packet-scoped media metadata (bytes live in assets/). */
   assets: Record<AssetId, AssetMeta>
+}
+
+export interface GalleyTemplateBlueprint {
+  id: string
+  title: string
+  description?: string
+  source?: 'builtin' | 'plugin' | 'workspace'
+  sheets: {
+    id: SheetId
+    title: string
+    geometry: PageGeometry
+    starterBlocks: Record<string, unknown>[]
+  }[]
+}
+
+export interface GalleyPreflightWarning {
+  code: string
+  severity: 'info' | 'warn' | 'error'
+  sheetId?: SheetId
+  blockId?: BlockId
+  message: string
 }
 
 export interface AssetMeta {
@@ -236,9 +265,12 @@ export interface RenderDiagnostic {
   col?: number
 }
 
+export type ProposalOp = 'insert' | 'patch' | 'move' | 'remove'
 export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'conflicted'
 export interface GalleyProposal {
   id: string
+  op?: ProposalOp
+  sheetId?: SheetId
   targetBlockId: BlockId
   baseHash: string
   beforePatch?: Record<string, unknown>
@@ -294,10 +326,12 @@ export interface StateActivePayload {
   activePacket: true
   cwd: string
   packets: PacketSummaryInfo[]
+  templates: GalleyTemplateBlueprint[]
   rev: number
   packetId: PacketId
-  template: GalleyPacket['template']
+  template: string
   title: string
+  reviewMode: ReviewMode
   activeSheetId: SheetId
   sheetOrder: SheetId[]
   assets: Record<AssetId, AssetMeta>
@@ -305,6 +339,7 @@ export interface StateActivePayload {
   redoDepth: number
   sheets: StateSheetView[]
   staleDependents: { id: BlockId; origin: BlockId; sinceHash: string; state: StaleInfo['state'] }[]
+  preflight: GalleyPreflightWarning[]
   proofs: StateProofView[]
 }
 
@@ -313,6 +348,7 @@ export interface StateEmptyPayload {
   activePacket: false
   cwd: string
   packets: PacketSummaryInfo[]
+  templates: GalleyTemplateBlueprint[]
   rev: 0
   packetId: null
 }

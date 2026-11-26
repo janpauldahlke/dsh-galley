@@ -29,6 +29,8 @@ declare module '@deepseek-ai/cordis' {
      * the dispose function, do not call it.
      */
     effect(disposer: () => unknown, label?: string): void
+    /** Register a service on the Cordis context; returns a withdraw disposer. */
+    provide?(name: string, value: unknown): () => void
     /** Run `fn` once the named capabilities are present (deferred bootstrap). */
     inject(names: string[], fn: (ctx: Context) => void): void
     /** Per-plugin logger (may be absent in headless profiles — call via `?.`). */

@@ -12,12 +12,13 @@
  * objects (recursive), compact — then sha256 hex. Timestamps and derived
  * fields are OUTSIDE the hash, so the hash is stable across save/load.
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import {
   mkdirSync,
   rmSync,
   readFileSync,
   writeFileSync,
+  copyFileSync,
   renameSync,
   unlinkSync,
   readdirSync,
@@ -39,6 +40,9 @@ import type {
   AssetMeta,
   GalleyProposal,
   GalleyAnnotation,
+  GalleyTemplateBlueprint,
+  PageGeometry,
+  ReviewMode,
 } from '../shared/types.ts'
 
 export const UNDO_DEPTH = 50
@@ -169,6 +173,8 @@ export function makeDepEdge(id: BlockId, sinceHash: string, at: string): DepEdge
 export interface PacketSummary {
   id: string
   title: string
+  template: string
+  reviewMode: ReviewMode
   rev: number
   updatedAt: string
 }
@@ -241,19 +247,220 @@ export class GalleyStore {
   list(): PacketSummary[] {
     if (!existsSync(this.root)) return []
     return readdirSync(this.root, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && existsSync(join(this.root, e.name, 'packet.json')))
+      .filter((e) => e.isDirectory() && e.name !== 'templates' && existsSync(join(this.root, e.name, 'packet.json')))
       .map((e) => {
         const p = this.load(e.name)!
-        return { id: p.id, title: p.title, rev: p.rev, updatedAt: p.updatedAt }
+        return {
+          id: p.id,
+          title: p.title,
+          template: p.template,
+          reviewMode: p.reviewMode ?? 'auto',
+          rev: p.rev,
+          updatedAt: p.updatedAt,
+        }
       })
-      .sort((a, b) => a.id.localeCompare(b.id))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
   }
 
   delete(id: string): void {
     const dir = this.dir(id)
     if (!existsSync(dir)) throw new StoreError('not_found', `packet ${id} not found`)
-    if (this.getActivePacket() === id) this.clearActivePacket()
+    if (this.getActivePacket() === id) {
+      const remaining = this.list().filter((p) => p.id !== id)
+      if (remaining.length > 0) this.setActivePacket(remaining[0].id)
+      else this.clearActivePacket()
+    }
     rmSync(dir, { recursive: true, force: true })
+  }
+
+  renamePacket(id: string, title: string): GalleyPacket {
+    const trimmed = title.trim()
+    if (!trimmed) throw new StoreError('invalid_op', 'packet title must be non-empty')
+    return this.commit(id, null, (p) => {
+      p.title = trimmed
+      return null
+    }).packet
+  }
+
+  setReviewMode(id: string, mode: ReviewMode): GalleyPacket {
+    if (mode !== 'auto' && mode !== 'review') {
+      throw new StoreError('invalid_op', `invalid reviewMode '${String(mode)}'`)
+    }
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    packet.reviewMode = mode
+    packet.rev += 1
+    packet.updatedAt = new Date().toISOString()
+    this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
+    const journal = this.readJson<{ rev: number; at: string; note: string }[]>(this.journalPath(id), [])
+    journal.push({ rev: packet.rev, at: packet.updatedAt, note: `reviewMode ${mode}` })
+    this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
+    return packet
+  }
+
+  duplicatePacket(id: string, newTitle?: string): GalleyPacket {
+    const src = this.load(id)
+    if (!src) throw new StoreError('not_found', `packet ${id} not found`)
+    const b32 = 'abcdefghijklmnopqrstuvwxyz234567'
+    const rand = randomBytes(8)
+    let newSuffix = ''
+    for (let i = 0; i < 8; i++) newSuffix += b32[rand[i] & 31]
+    const newId = `p-${newSuffix}`
+
+    const copy = JSON.parse(JSON.stringify(src)) as GalleyPacket
+    copy.id = newId
+    copy.title = newTitle?.trim() || `${src.title} (Kopie)`
+    this.create(copy)
+
+    // Copy binary assets if present
+    const srcAssetsDir = join(this.dir(id), 'assets')
+    if (existsSync(srcAssetsDir)) {
+      const dstAssetsDir = join(this.dir(newId), 'assets')
+      mkdirSync(dstAssetsDir, { recursive: true })
+      for (const entry of readdirSync(srcAssetsDir)) {
+        copyFileSync(join(srcAssetsDir, entry), join(dstAssetsDir, entry))
+      }
+    }
+
+    this.setActivePacket(newId)
+    return this.load(newId)!
+  }
+
+  // ── Sheet CRUD (all committed through undo-safe single commit path) ───────
+
+  addSheet(
+    id: string,
+    opts?: { title?: string; orientation?: 'portrait' | 'landscape'; targetPages?: number; paper?: 'a4' | 'letter' },
+  ): { packet: GalleyPacket; sheetId: SheetId } {
+    let createdSheetId: SheetId = 's1'
+    const res = this.commit(id, null, (p) => {
+      let n = p.sheetOrder.length + 1
+      while (p.sheets[`s${n}`]) n++
+      createdSheetId = `s${n}`
+      const geometry: PageGeometry = {
+        paper: opts?.paper ?? 'a4',
+        orientation: opts?.orientation ?? 'portrait',
+        margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+        ...(opts?.targetPages !== undefined ? { targetPages: opts.targetPages } : {}),
+      }
+      p.sheets[createdSheetId] = {
+        id: createdSheetId,
+        title: opts?.title?.trim() || `Bogen ${p.sheetOrder.length + 1}`,
+        geometry,
+        blocks: [],
+      }
+      p.sheetOrder.push(createdSheetId)
+      return null
+    })
+    return { packet: res.packet, sheetId: createdSheetId }
+  }
+
+  renameSheet(id: string, sheetId: SheetId, title: string): GalleyPacket {
+    const trimmed = title.trim()
+    if (!trimmed) throw new StoreError('invalid_op', 'sheet title must be non-empty')
+    return this.commit(id, null, (p) => {
+      const sh = p.sheets[sheetId]
+      if (!sh) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
+      sh.title = trimmed
+      return null
+    }).packet
+  }
+
+  removeSheet(id: string, sheetId: SheetId): GalleyPacket {
+    return this.commit(id, null, (p) => {
+      if (!p.sheets[sheetId]) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
+      if (p.sheetOrder.length <= 1) throw new StoreError('invalid_op', 'cannot remove the last remaining sheet')
+      delete p.sheets[sheetId]
+      p.sheetOrder = p.sheetOrder.filter((sid) => sid !== sheetId)
+      return null
+    }).packet
+  }
+
+  reorderSheet(id: string, sheetId: SheetId, direction: 'left' | 'right'): GalleyPacket {
+    return this.commit(id, null, (p) => {
+      const idx = p.sheetOrder.indexOf(sheetId)
+      if (idx < 0) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
+      const swapIdx = direction === 'left' ? idx - 1 : idx + 1
+      if (swapIdx < 0 || swapIdx >= p.sheetOrder.length) return null
+      const nextOrder = [...p.sheetOrder]
+      const tmp = nextOrder[idx]
+      nextOrder[idx] = nextOrder[swapIdx]
+      nextOrder[swapIdx] = tmp
+      p.sheetOrder = nextOrder
+      return null
+    }).packet
+  }
+
+  // ── Workspace Template Blueprints (.dsh/galley/templates/<slug>.json) ─────
+
+  private templatesDir(): string {
+    return join(this.root, 'templates')
+  }
+
+  saveAsTemplate(
+    packetId: string,
+    opts?: { id?: string; title?: string; description?: string },
+  ): GalleyTemplateBlueprint {
+    const packet = this.load(packetId)
+    if (!packet) throw new StoreError('not_found', `packet ${packetId} not found`)
+    const title = opts?.title?.trim() || packet.title
+    const rawSlug = (opts?.id?.trim() || title)
+      .normalize('NFKD')
+      .replace(/[^\w\s-]/g, '')
+      .trim()
+      .replace(/[\s_]+/g, '-')
+      .toLowerCase() || 'vorlage'
+    const reserved = new Set(['arbeitsblatt', 'rfc', 'generic'])
+    const id = reserved.has(rawSlug) ? `${rawSlug}-vorlage` : rawSlug
+
+    const blueprint: GalleyTemplateBlueprint = {
+      id,
+      title,
+      description: opts?.description?.trim() || undefined,
+      source: 'workspace',
+      sheets: packet.sheetOrder.map((sid) => {
+        const sh = packet.sheets[sid]
+        return {
+          id: sh.id,
+          title: sh.title,
+          geometry: JSON.parse(JSON.stringify(sh.geometry)) as PageGeometry,
+          starterBlocks: sh.blocks.map((b) => {
+            const proj = blockContentProjection(b)
+            // Strip packet-specific binary asset binding so starter blocks open cleanly anywhere
+            if (proj.slot && typeof proj.slot === 'object' && 'asset' in (proj.slot as Record<string, unknown>)) {
+              proj.slot = { mode: 'full' }
+            }
+            proj.dependsOn = []
+            return proj
+          }),
+        }
+      }),
+    }
+    this.atomicWrite(join(this.templatesDir(), `${id}.json`), JSON.stringify(blueprint, null, 2))
+    return blueprint
+  }
+
+  listSavedTemplates(): GalleyTemplateBlueprint[] {
+    const dir = this.templatesDir()
+    if (!existsSync(dir)) return []
+    const out: GalleyTemplateBlueprint[] = []
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const parsed = this.readJson<GalleyTemplateBlueprint | null>(join(dir, entry.name), null)
+      if (parsed && typeof parsed.id === 'string' && Array.isArray(parsed.sheets)) {
+        out.push({ ...parsed, source: 'workspace' })
+      }
+    }
+    return out.sort((a, b) => a.title.localeCompare(b.title))
+  }
+
+  deleteSavedTemplate(templateId: string): boolean {
+    const safe = templateId.replace(/[^A-Za-z0-9_-]/g, '')
+    if (!safe) return false
+    const p = join(this.templatesDir(), `${safe}.json`)
+    if (!existsSync(p)) return false
+    unlinkSync(p)
+    return true
   }
 
   // ── active packet (M1.5 H4): the packet tools operate on by default ──────
@@ -425,44 +632,118 @@ export class GalleyStore {
     return p
   }
   /**
-   * Accept a proposal (spec 01 §7): apply its patch to the target block as an
-   * agent-origin write (the human re-claimed it, so the block becomes agent's),
-   * refresh hashes + staleness, and mark it applied. Throws
-   * StoreError('proposal_not_found') if the id is unknown, or 'conflict' if the
-   * block changed since the proposal was recorded.
+   * Accept a proposal (spec 01 §7, M2.5 unified review gate):
+   * - Supports all 4 proposal ops (`insert` | `patch` | `move` | `remove`).
+   * - Sets block `origin = 'human'` (settled human approval — accepting a
+   *   suggestion never hands ownership away to unguarded agent rewrites).
+   * - Refreshes outgoing `dependsOn` `sinceHash` edges to current origin hashes.
    */
   applyProposal(id: string, proposalId: string): GalleyProposal {
     const proposal = this.listProposals(id).find((p) => p.id === proposalId)
     if (!proposal) throw new StoreError('proposal_not_found', `proposal ${proposalId} not found`)
-    this.commit(
-      id,
-      { blockId: proposal.targetBlockId, baseHash: proposal.baseHash },
-      (p) => {
-        const sheet = Object.values(p.sheets).find((s) => s.blocks.some((b) => b.id === proposal.targetBlockId))
-        if (!sheet) throw new StoreError('not_found', `block ${proposal.targetBlockId} not found`)
-        const b = sheet.blocks.find((x) => x.id === proposal.targetBlockId)! as unknown as Record<string, unknown>
-        for (const [k, v] of Object.entries(proposal.proposedPatch)) {
-          if (k === 'body') {
-            b.body = typeof v === 'string' ? [{ t: 'text', v }] : (Array.isArray(v) ? v : [{ t: 'text', v: String(v) }])
-          } else if (k !== 'origin' && k !== 'id' && k !== 'hash') {
-            b[k] = v
-          }
+    if (proposal.status !== 'pending') {
+      throw new StoreError('invalid_op', `proposal ${proposalId} is already ${proposal.status}`)
+    }
+    const op = proposal.op ?? 'patch'
+    const expect =
+      op === 'insert' ? null : { blockId: proposal.targetBlockId, baseHash: proposal.baseHash }
+
+    this.commit(id, expect, (p) => {
+      if (op === 'insert') {
+        const sid = proposal.sheetId ?? p.sheetOrder[0]
+        const sh = p.sheets[sid]
+        if (!sh) throw new StoreError('invalid_op', `sheet ${sid} not found`)
+        const candidate = JSON.parse(JSON.stringify(proposal.proposedPatch.block)) as Block
+        // Re-allocate id if the staged id was already claimed meanwhile
+        const existing = findBlock(p, candidate.id)
+        if (existing) candidate.id = allocateBlockId(p)
+        candidate.origin = 'human'
+        candidate.updatedAt = new Date().toISOString()
+        candidate.hash = hashBlock(candidate)
+        const beforeId = typeof proposal.proposedPatch.beforeId === 'string' ? proposal.proposedPatch.beforeId : undefined
+        const idx = beforeId ? sh.blocks.findIndex((x) => x.id === beforeId) : sh.blocks.length
+        sh.blocks.splice(idx < 0 ? sh.blocks.length : idx, 0, candidate)
+        p.nextBlockSeq += 1
+        return candidate.id
+      }
+
+      if (op === 'move') {
+        const from = findBlock(p, proposal.targetBlockId)
+        if (!from) throw new StoreError('not_found', `block ${proposal.targetBlockId} not found`)
+        const targetSid = (proposal.proposedPatch.toSheetId as SheetId | undefined) ?? proposal.sheetId ?? from.sheet.id
+        const targetSheet = p.sheets[targetSid]
+        if (!targetSheet) throw new StoreError('invalid_op', `target sheet ${targetSid} not found`)
+        from.sheet.blocks.splice(from.index, 1)
+        let to = targetSheet.blocks.length
+        const toBeforeId = proposal.proposedPatch.toBeforeId as BlockId | undefined
+        const toAfterId = proposal.proposedPatch.toAfterId as BlockId | undefined
+        if (toBeforeId) to = targetSheet.blocks.findIndex((x) => x.id === toBeforeId)
+        if (toAfterId) {
+          const i = targetSheet.blocks.findIndex((x) => x.id === toAfterId)
+          to = i >= 0 ? i + 1 : targetSheet.blocks.length
         }
-        // Spec 01 §6: accepting a proposal refreshes outgoing dependency edges to current origin hashes.
-        if (Array.isArray(b.dependsOn) && b.dependsOn.length > 0) {
-          const now = new Date().toISOString()
-          b.dependsOn = (b.dependsOn as DepEdge[]).map((d) => {
-            const origin = findBlock(p, d.id)
-            return origin ? { id: d.id, sinceHash: origin.block.hash, at: now } : d
-          })
+        from.block.origin = 'human'
+        targetSheet.blocks.splice(to < 0 ? targetSheet.blocks.length : to, 0, from.block)
+        return from.block.id
+      }
+
+      if (op === 'remove') {
+        const found = findBlock(p, proposal.targetBlockId)
+        if (!found) throw new StoreError('not_found', `block ${proposal.targetBlockId} not found`)
+        found.sheet.blocks.splice(found.index, 1)
+        return null
+      }
+
+      // Default: 'patch'
+      const located = findBlock(p, proposal.targetBlockId)
+      if (!located) throw new StoreError('not_found', `block ${proposal.targetBlockId} not found`)
+      const b = located.block as unknown as Record<string, unknown>
+      for (const [k, v] of Object.entries(proposal.proposedPatch)) {
+        if (k === 'body') {
+          b.body = typeof v === 'string' ? [{ t: 'text', v }] : Array.isArray(v) ? v : [{ t: 'text', v: String(v) }]
+        } else if (k !== 'origin' && k !== 'id' && k !== 'hash') {
+          b[k] = v
         }
-        b.origin = 'agent' // spec 01 §7: accept → origin = 'agent'
-        return proposal.targetBlockId
-      },
-    )
+      }
+      if (Array.isArray(b.dependsOn) && b.dependsOn.length > 0) {
+        const now = new Date().toISOString()
+        b.dependsOn = (b.dependsOn as DepEdge[]).map((d) => {
+          const origin = findBlock(p, d.id)
+          return origin ? { id: d.id, sinceHash: origin.block.hash, at: now } : d
+        })
+      }
+      b.origin = 'human' // spec 01 §7 (M2.5): accepted proposal becomes settled human content
+      return proposal.targetBlockId
+    })
+
     // commit() above already bumped packet.rev; record status without double-bumping.
     const updated = this.setProposalStatus(id, proposalId, 'accepted', { bumpRev: false })!
     return updated
+  }
+
+  acceptAllProposals(id: string): { accepted: string[]; conflicted: string[]; rev: number } {
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    const pending = this.listProposals(id).filter((p) => p.status === 'pending')
+    const accepted: string[] = []
+    const conflicted: string[] = []
+    for (const prop of pending) {
+      try {
+        this.applyProposal(id, prop.id)
+        accepted.push(prop.id)
+      } catch (err) {
+        if (err instanceof StoreError && (err.code === 'conflict' || err.code === 'not_found')) {
+          this.setProposalStatus(id, prop.id, 'conflicted', { bumpRev: false })
+          conflicted.push(prop.id)
+        } else {
+          throw err
+        }
+      }
+    }
+    if (accepted.length === 0 && conflicted.length > 0) {
+      this.bumpRev(id, 'proposals conflicted')
+    }
+    return { accepted, conflicted, rev: this.load(id)!.rev }
   }
   addAnnotation(id: string, annotation: GalleyAnnotation): GalleyAnnotation {
     const list = this.readJson<GalleyAnnotation[]>(join(this.dir(id), 'annotations.json'), [])

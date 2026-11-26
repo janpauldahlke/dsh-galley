@@ -375,7 +375,7 @@ test('HTTP routes: media insert-asset + card-grid slot + proposal 409/accept + u
   assert.equal(conflictDecide.status, 409)
   assert.equal(conflictDecide.json.code, Err.PROPOSAL_CONFLICT)
 
-  // Second agent proposal accepted cleanly -> 200, origin flips to 'agent'
+  // Second agent proposal accepted cleanly -> 200, origin stays 'human' (settled)
   const prop2 = await postJson('/api/galley/edit', {
     cwd: wsA,
     op: 'patch',
@@ -389,7 +389,7 @@ test('HTTP routes: media insert-asset + card-grid slot + proposal 409/accept + u
     action: 'accept',
   })
   assert.equal(okDecide.status, 200)
-  assert.equal(okDecide.json.block.origin, 'agent')
+  assert.equal(okDecide.json.block.origin, 'human')
 
   // 4. Undo + Redo over HTTP advance rev monotonically
   const undoRes = await postJson('/api/galley/edit', { cwd: wsA, op: 'undo' })

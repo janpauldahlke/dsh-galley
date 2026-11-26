@@ -1,6 +1,6 @@
 # dsh-galley
 
-> **Status:** `0.1.0` — M2 Live Rightbar Pane, Native Typst Proof & 6-Tool Surface
+> **Status:** `0.1.0` — M2.5 Workbench CRUD, Review Lock, `ctx.galley` Service & Typst Proof
 
 Shared volatile **document workbench & typesetter** (*Druck und Satz*) for
 human + agent co-authoring in the **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) web and desktop UI.

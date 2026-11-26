@@ -22,12 +22,14 @@ import {
   STATE_ROUTE,
   EDIT_ROUTE,
   EXPORT_ROUTE,
+  DOWNLOAD_ROUTE,
   PROPOSAL_ROUTE_PREFIX,
 } from '../shared/types.ts'
 import type { GalleyPacket, GalleySheet } from '../shared/types.ts'
 import { renderTypstSource, type GalleyBlock } from '../typst/index.ts'
 import { createPrimaryArm, type Arm } from './arms/index.ts'
 import { registerGalleyRoutes } from './routes.ts'
+import { defaultGalleyRegistry, GalleyServiceRegistry, type GalleyService } from './service.ts'
 import { getStoreForCwd, resolveGalleyCwd } from './workspace.ts'
 import {
   galleyOpen,
@@ -46,10 +48,14 @@ export {
   STATE_ROUTE,
   EDIT_ROUTE,
   EXPORT_ROUTE,
+  DOWNLOAD_ROUTE,
   PROPOSAL_ROUTE_PREFIX,
   PLUGIN,
   VERSION,
+  defaultGalleyRegistry,
+  GalleyServiceRegistry,
 }
+export type { GalleyService }
 // Arms are re-exported so the in-process gate test (test/05) and the health
 // probe can drive the real render pipeline; `@myriaddreamin/*` stays external
 // (the native .node binary is loaded lazily by NativeArm.init).
@@ -137,6 +143,10 @@ function toolErrorResult(error: unknown) {
 }
 
 function renderJson(_args: unknown, value: unknown): Array<{ type: 'text'; text: string }> {
+  if (value && typeof value === 'object' && !Array.isArray(value) && 'bytes' in value) {
+    const { bytes: _omit, ...compact } = value as Record<string, unknown>
+    return [{ type: 'text', text: JSON.stringify(compact, null, 2) }]
+  }
   return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
 }
 
@@ -168,6 +178,8 @@ async function getDepsForCwd(cwdParam?: string | null): Promise<{
     cwd,
     deps: {
       store,
+      cwd,
+      registry: defaultGalleyRegistry,
       render: (sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>) =>
         arm.render(sheet, packet, assetBytes),
     },
@@ -209,8 +221,12 @@ export function registerGalleyTools(ctx: Context): () => void {
       properties: {
         cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         id: { type: 'string', description: 'Switch active packet to an existing packetId (exclusive with create fields).' },
-        template: { type: 'string', enum: ['arbeitsblatt', 'rfc', 'generic'] },
+        template: {
+          type: 'string',
+          description: 'Built-in ("arbeitsblatt" | "rfc" | "generic") or custom/plugin template id.',
+        },
         title: { type: 'string' },
+        orientation: { type: 'string', enum: ['portrait', 'landscape'] },
         targetPages: { type: 'integer' },
         blocks: {
           type: 'array',
@@ -311,7 +327,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       properties: {
         cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
-        sheetId: { type: 'string' },
+        sheetId: { type: 'string', description: 'Optional: auto-resolved from blockId or active sheet when omitted.' },
         op: { type: 'string', enum: ['insert', 'patch', 'move', 'remove'] },
         beforeId: { type: 'string' },
         block: { type: 'object', additionalProperties: true },
@@ -322,7 +338,7 @@ export function registerGalleyTools(ctx: Context): () => void {
         toBeforeId: { type: 'string' },
         toAfterId: { type: 'string' },
       },
-      required: ['sheetId', 'op'],
+      required: ['op'],
     },
     output: out({
       ok: { type: 'boolean' },
@@ -381,13 +397,23 @@ export function registerGalleyTools(ctx: Context): () => void {
         packetId: { type: 'string', description: 'Omit to use the active packet.' },
         format: { type: 'string', enum: ['typ', 'md', 'tex', 'pdf', 'docx'] },
         sheetId: { type: 'string' },
+        sheetIds: { type: 'array', items: { type: 'string' } },
       },
       required: ['format'],
     },
-    output: out({ ok: { type: 'boolean' }, format: { type: 'string' } }),
+    output: out({
+      ok: { type: 'boolean' },
+      format: { type: 'string' },
+      files: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        return await galleyExport(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyExport>[1]))
+        const deps = await getToolDeps(args, exec)
+        const exportArgs = {
+          ...(args as unknown as Parameters<typeof galleyExport>[1]),
+          outDir: deps.cwd,
+        }
+        return await galleyExport(deps, exportArgs)
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -429,10 +455,21 @@ function registerHealthRoute(ctx: Context): void {
 }
 
 export function apply(ctx: Context): void {
+  // Expose `ctx.galley` Cordis service so companion leaf bundles can register
+  // reusable templates and deterministic preflight checks cleanly.
+  try {
+    if (typeof ctx.provide === 'function') {
+      const withdraw = ctx.provide('galley', defaultGalleyRegistry.toCordisService())
+      if (typeof withdraw === 'function') {
+        ctx.effect(() => withdraw, 'galley: cordis service')
+      }
+    }
+  } catch (error) {
+    ctx.logger?.(PLUGIN)?.warn?.('galley service registration failed: %s', errorMessage(error))
+  }
+
   try {
     const disposeTools = registerGalleyTools(ctx)
-    // Cordis: the effect body's RETURN VALUE is the disposer. Returning
-    // disposeTools (not calling it) registers it as the disposer.
     ctx.effect(() => disposeTools, 'galley: tools')
   } catch (error) {
     ctx.logger?.(PLUGIN)?.warn?.('tool registration failed (continuing without it): %s', errorMessage(error))
@@ -442,7 +479,7 @@ export function apply(ctx: Context): void {
   ctx.inject(['webServer'], (webCtx: Context) => {
     try {
       registerHealthRoute(webCtx)
-      registerGalleyRoutes(webCtx, { getDepsForCwd })
+      registerGalleyRoutes(webCtx, { getDepsForCwd, registry: defaultGalleyRegistry })
     } catch (error) {
       webCtx.logger?.(PLUGIN)?.error?.('route registration failed: %s', errorMessage(error))
     }

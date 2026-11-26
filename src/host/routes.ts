@@ -8,6 +8,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import {
+  DOWNLOAD_ROUTE,
   EDIT_ROUTE,
   EXPORT_ROUTE,
   PLUGIN,
@@ -60,6 +61,13 @@ export function registerGalleyRoutes(ctx: Context, deps: GalleyHttpDispatcherDep
     handler,
   })
   ctx.effect(() => unregisterExport, 'galley: /api/galley/export route')
+
+  const unregisterDownload = ctx.webServer.register({
+    kind: 'exact',
+    path: DOWNLOAD_ROUTE,
+    handler,
+  })
+  ctx.effect(() => unregisterDownload, 'galley: /api/galley/download route')
 
   const unregisterProposal = ctx.webServer.register({
     kind: 'prefix',

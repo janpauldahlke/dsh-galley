@@ -298,6 +298,31 @@ export function reconcileDraftBuffer(
   }
 }
 
+export interface CommitOutcome {
+  ok: boolean
+  status: number
+}
+
+/**
+ * Apply the HTTP result of a human commit to the local draft buffer (Spec 04 §4.4):
+ * - `ok: true` -> clears `dirty` and `conflict`.
+ * - `status === 409` -> MUST preserve `dirty: true` and set `conflict: true` so
+ *   a subsequent state poll never clobbers uncommitted human keystrokes!
+ * - other errors -> keep `dirty: true` so local work is retained.
+ */
+export function applyCommitOutcome(
+  draft: BlockDraftBuffer,
+  outcome: CommitOutcome,
+): BlockDraftBuffer {
+  if (outcome.ok) {
+    return { ...draft, dirty: false, conflict: false, remoteHash: undefined }
+  }
+  if (outcome.status === 409) {
+    return { ...draft, dirty: true, conflict: true }
+  }
+  return { ...draft, dirty: true }
+}
+
 /** Convert a BlockDraftBuffer into the `patch` payload for `POST /api/galley/edit`. */
 export function draftBufferToPatch(draft: BlockDraftBuffer): Record<string, unknown> {
   const patch: Record<string, unknown> = {}

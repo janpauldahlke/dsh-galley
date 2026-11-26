@@ -1,7 +1,8 @@
 /**
  * Block Tray (Spec 04 §4–§5) — flat ordered block rows per sheet, structural
- * insert/move/remove actions, stale dependency badges, proposal diff Accept/
- * Revert overlay, and margin annotations (Randnotizen).
+ * insert/move/remove actions, stale dependency badges, unified 4-op proposal
+ * diff Accept/Revert cards (`insert`, `patch`, `move`, `remove`), and margin
+ * annotations (Randnotizen).
  */
 import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
@@ -9,6 +10,7 @@ import { serializeInlines } from '../shared/inlineMarkup.ts'
 import type {
   AssetId,
   AssetMeta,
+  Block,
   BlockId,
   BlockType,
   GalleyAnnotation,
@@ -18,7 +20,11 @@ import type {
   StateSheetView,
 } from '../shared/types.ts'
 import { BlockEditor } from './BlockEditor.tsx'
-import { createStarterBlockPayload, flattenBlockPreview } from './paneModel.ts'
+import {
+  createStarterBlockPayload,
+  flattenBlockPreview,
+  type CommitOutcome,
+} from './paneModel.ts'
 
 const ALL_BLOCK_TYPES: { type: BlockType; label: string; icon: string }[] = [
   { type: 'header', label: 'Kopfbogen (header)', icon: '▤' },
@@ -37,6 +43,11 @@ function iconForType(type: BlockType): string {
 
 function summarizePatchSide(patch: Record<string, unknown> | undefined): string {
   if (!patch) return '—'
+  if (patch.remove === true) return 'Block entfernen'
+  if (patch.block && typeof patch.block === 'object') {
+    const b = patch.block as Block
+    return `[${b.type}] ${flattenBlockPreview(b, 80)}`
+  }
   if (Array.isArray(patch.body)) return serializeInlines(patch.body as Inline[])
   if (typeof patch.body === 'string') return patch.body
   return JSON.stringify(patch)
@@ -50,7 +61,7 @@ export interface BlockTrayProps {
   busy: boolean
   onSelectBlock: (blockId: BlockId | null) => void
   onInsertBlock: (sheetId: SheetId, block: Record<string, unknown>, afterBlockId?: BlockId) => Promise<void>
-  onPatchBlock: (blockId: BlockId, patch: Record<string, unknown>, baseHash?: string) => Promise<void>
+  onPatchBlock: (blockId: BlockId, patch: Record<string, unknown>, baseHash?: string) => Promise<CommitOutcome>
   onMoveBlock: (sheetId: SheetId, blockId: BlockId, direction: 'up' | 'down') => Promise<void>
   onRemoveBlock: (sheetId: SheetId, blockId: BlockId) => Promise<void>
   onUploadAsset: (args: {
@@ -101,11 +112,16 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
   const [proposalOpenId, setProposalOpenId] = useState<string | null>(null)
 
   const pendingProposalsByBlock = new Map<BlockId, GalleyProposal[]>()
+  const pendingInsertProposals: GalleyProposal[] = []
   for (const p of sheet.proposals) {
     if (p.status === 'pending' || p.status === 'conflicted') {
-      const list = pendingProposalsByBlock.get(p.targetBlockId) ?? []
-      list.push(p)
-      pendingProposalsByBlock.set(p.targetBlockId, list)
+      if (p.op === 'insert') {
+        pendingInsertProposals.push(p)
+      } else {
+        const list = pendingProposalsByBlock.get(p.targetBlockId) ?? []
+        list.push(p)
+        pendingProposalsByBlock.set(p.targetBlockId, list)
+      }
     }
   }
 
@@ -116,6 +132,73 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
       list.push(a)
       openAnnotationsByBlock.set(a.blockId, list)
     }
+  }
+
+  const renderProposalCard = (prop: GalleyProposal): ReactNode => {
+    const opLabel =
+      prop.op === 'insert'
+        ? 'Neuer Block vorgeschlagen'
+        : prop.op === 'remove'
+          ? 'Block-Löschung vorgeschlagen'
+          : prop.op === 'move'
+            ? 'Verschiebung vorgeschlagen'
+            : 'Änderungsvorschlag'
+    return (
+      <div
+        key={prop.id}
+        data-testid={`galley-proposal-card-${prop.id}`}
+        style={{
+          marginTop: 6,
+          marginBottom: prop.op === 'insert' ? 6 : 0,
+          padding: '6px 8px',
+          borderRadius: 5,
+          border: `1px solid ${prop.status === 'conflicted' ? '#dc2626' : '#d97706'}`,
+          background:
+            prop.status === 'conflicted' ? 'rgba(220,38,38,0.1)' : 'rgba(217,119,6,0.1)',
+          fontSize: 11,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+        }}
+      >
+        <div style={{ fontWeight: 600 }}>
+          Δ Agent: {opLabel} ({prop.id})
+          {prop.status === 'conflicted'
+            ? ' — Konflikt (Inhalt inzwischen geändert)'
+            : ''}
+        </div>
+        {prop.beforePatch && (
+          <div style={{ opacity: 0.78 }}>
+            <span style={{ color: '#dc2626', fontWeight: 600 }}>− Vorher: </span>
+            {summarizePatchSide(prop.beforePatch)}
+          </div>
+        )}
+        <div>
+          <span style={{ color: '#16a34a', fontWeight: 600 }}>+ Vorschlag: </span>
+          {summarizePatchSide(prop.proposedPatch)}
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
+          {prop.status === 'pending' && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => { void onDecideProposal(prop.id, 'accept') }}
+              style={{ ...iconBtn, borderColor: '#16a34a', color: '#16a34a', fontWeight: 600 }}
+            >
+              ✓ Annehmen
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => { void onDecideProposal(prop.id, 'revert') }}
+            style={iconBtn}
+          >
+            ✕ Verwerfen
+          </button>
+        </div>
+      </div>
+    )
   }
 
   const renderInsertPicker = (afterId?: BlockId): ReactNode => (
@@ -185,7 +268,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 10px' }}>
         {insertAfterTarget === '__end__' && sheet.blocks.length === 0 && renderInsertPicker(undefined)}
 
-        {sheet.blocks.length === 0 && insertAfterTarget !== '__end__' && (
+        {sheet.blocks.length === 0 && pendingInsertProposals.length === 0 && insertAfterTarget !== '__end__' && (
           <div style={{ opacity: 0.7, fontSize: 12, padding: '16px 4px', textAlign: 'center' }}>
             Noch keine Blöcke auf diesem Bogen — über „+ Block anfügen“ starten.
           </div>
@@ -260,14 +343,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                       {block.slot.mode}
                     </span>
                   )}
-                  <span
-                    style={{
-                      fontSize: 10,
-                      opacity: 0.62,
-                    }}
-                  >
-                    {block.origin}
-                  </span>
+                  <span style={{ fontSize: 10, opacity: 0.62 }}>{block.origin}</span>
                   <span
                     style={{
                       opacity: 0.85,
@@ -387,61 +463,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
               {/* Proposal diff overlay (Spec 04 §5 S2) */}
               {blockProposals
                 .filter((p) => proposalOpenId === p.id || blockProposals.length === 1)
-                .map((prop) => (
-                  <div
-                    key={prop.id}
-                    data-testid={`galley-proposal-card-${prop.id}`}
-                    style={{
-                      marginTop: 6,
-                      padding: '6px 8px',
-                      borderRadius: 5,
-                      border: `1px solid ${prop.status === 'conflicted' ? '#dc2626' : '#d97706'}`,
-                      background:
-                        prop.status === 'conflicted' ? 'rgba(220,38,38,0.1)' : 'rgba(217,119,6,0.1)',
-                      fontSize: 11,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 4,
-                    }}
-                  >
-                    <div style={{ fontWeight: 600 }}>
-                      Agent-Änderungsvorschlag ({prop.id})
-                      {prop.status === 'conflicted'
-                        ? ' — Inhalt inzwischen geändert (bitte verwerfen oder neu anfordern)'
-                        : ''}
-                    </div>
-                    {prop.beforePatch && (
-                      <div style={{ opacity: 0.78 }}>
-                        <span style={{ color: '#dc2626', fontWeight: 600 }}>− Vorher: </span>
-                        {summarizePatchSide(prop.beforePatch)}
-                      </div>
-                    )}
-                    <div>
-                      <span style={{ color: '#16a34a', fontWeight: 600 }}>+ Vorschlag: </span>
-                      {summarizePatchSide(prop.proposedPatch)}
-                    </div>
-                    <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
-                      {prop.status === 'pending' && (
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => { void onDecideProposal(prop.id, 'accept') }}
-                          style={{ ...iconBtn, borderColor: '#16a34a', color: '#16a34a', fontWeight: 600 }}
-                        >
-                          ✓ Annehmen
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => { void onDecideProposal(prop.id, 'revert') }}
-                        style={iconBtn}
-                      >
-                        ✕ Verwerfen
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                .map((prop) => renderProposalCard(prop))}
 
               {/* Margin notes (Randnotizen, Spec 04 §5 S4) */}
               {(noteOpenBlockId === block.id || blockNotes.length > 0) && (
@@ -529,6 +551,9 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
             </div>
           )
         })}
+
+        {/* Staged insert proposals (in Review mode) */}
+        {pendingInsertProposals.map((prop) => renderProposalCard(prop))}
 
         {insertAfterTarget === '__end__' && sheet.blocks.length > 0 && renderInsertPicker(undefined)}
       </div>

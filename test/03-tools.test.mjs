@@ -327,7 +327,7 @@ test('proposal rule: 4/4 quadrants (agent/human block × patch/direct-op)', asyn
   assert.deepEqual((await blocksOf(q4.packetId)).map((b) => b.id), ['b2', 'b1'])
 })
 
-test('accept a proposal → block content + origin = agent (spec 01 §7)', async () => {
+test('accept a proposal → block content + origin = human (spec 01 §7 settled ownership)', async () => {
   const r = await openPacket([{ type: 'prose', body: 'human text' }])
   const baseHash = (await blockAt(r.packetId, 0)).hash
   const p = await galleyEditBlock(deps, {
@@ -340,7 +340,7 @@ test('accept a proposal → block content + origin = agent (spec 01 §7)', async
   assert.equal(accepted.status, 'accepted')
   const b = (await blockAt(r.packetId, 0))
   assert.equal(b.body[0].v, 'accepted text')
-  assert.equal(b.origin, 'agent')
+  assert.equal(b.origin, 'human')
 })
 
 // ── Every typed error code (spec 02 §3) at least once ───────────────────────

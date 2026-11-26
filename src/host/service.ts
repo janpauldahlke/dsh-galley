@@ -1,0 +1,247 @@
+/**
+ * Hermetic Cordis service registry & structural preflight engine (`ctx.galley`, Spec 02 §8).
+ *
+ * Allows sibling leaf bundles (domain template packs, `dsh-fundus`, RAG/citation
+ * verifiers) to register reusable templates and preflight checks with clean
+ * disposers while keeping `dsh-galley` strictly within its typesetting bounded context.
+ */
+import type {
+  BlockId,
+  GalleyPacket,
+  GalleyPreflightWarning,
+  GalleyTemplateBlueprint,
+  SheetId,
+} from '../shared/types.ts'
+import type { GalleyStore } from './store.ts'
+import { getStoreForCwd } from './workspace.ts'
+
+export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
+  {
+    id: 'arbeitsblatt',
+    title: 'Arbeitsblatt + Erwartungshorizont',
+    description: 'Zwei Bögen: Arbeitsblatt (A4, Ziel 1 Seite) + verknüpfter Erwartungshorizont',
+    source: 'builtin',
+    sheets: [
+      {
+        id: 's1',
+        title: 'Arbeitsblatt',
+        geometry: {
+          paper: 'a4',
+          orientation: 'portrait',
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+          targetPages: 1,
+        },
+        starterBlocks: [
+          { type: 'header', fields: { titel: 'Arbeitsblatt', fach: '', klasse: '', datum: '', name: '' } },
+          { type: 'task', body: 'Erste Aufgabe' },
+        ],
+      },
+      {
+        id: 's2',
+        title: 'Erwartungshorizont',
+        geometry: {
+          paper: 'a4',
+          orientation: 'portrait',
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+        },
+        starterBlocks: [
+          { type: 'heading', level: 1, body: 'Erwartungshorizont' },
+          { type: 'answer', body: 'Lösung' },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'rfc',
+    title: 'Engineering RFC',
+    description: 'Technischer Entwurfsbogen für Architektur- und Spezifikationsdokumente',
+    source: 'builtin',
+    sheets: [
+      {
+        id: 's1',
+        title: 'Document',
+        geometry: {
+          paper: 'a4',
+          orientation: 'portrait',
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+        },
+        starterBlocks: [],
+      },
+    ],
+  },
+  {
+    id: 'generic',
+    title: 'Leeres Dokument (Generic)',
+    description: 'Einzelner leerer A4-Bogen ohne Zielseitenlimit',
+    source: 'builtin',
+    sheets: [
+      {
+        id: 's1',
+        title: 'Document',
+        geometry: {
+          paper: 'a4',
+          orientation: 'portrait',
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+        },
+        starterBlocks: [],
+      },
+    ],
+  },
+]
+
+export type GalleyPreflightCheckFn = (packet: GalleyPacket, cwd: string) => GalleyPreflightWarning[]
+
+export interface GalleyService {
+  registerTemplate(blueprint: GalleyTemplateBlueprint): () => void
+  listTemplates(cwd?: string): GalleyTemplateBlueprint[]
+  registerPreflight(id: string, check: GalleyPreflightCheckFn): () => void
+  getStore(cwd?: string): GalleyStore
+}
+
+export class GalleyServiceRegistry {
+  private readonly pluginTemplates = new Map<string, GalleyTemplateBlueprint>()
+  private readonly preflightChecks = new Map<string, GalleyPreflightCheckFn>()
+
+  registerTemplate(blueprint: GalleyTemplateBlueprint): () => void {
+    const id = blueprint.id.trim()
+    if (!id) throw new Error('template blueprint requires a non-empty id')
+    const normalized: GalleyTemplateBlueprint = {
+      ...blueprint,
+      id,
+      source: blueprint.source ?? 'plugin',
+    }
+    this.pluginTemplates.set(id, normalized)
+    return () => {
+      if (this.pluginTemplates.get(id) === normalized) {
+        this.pluginTemplates.delete(id)
+      }
+    }
+  }
+
+  registerPreflight(id: string, check: GalleyPreflightCheckFn): () => void {
+    const key = id.trim()
+    if (!key) throw new Error('preflight check requires a non-empty id')
+    this.preflightChecks.set(key, check)
+    return () => {
+      if (this.preflightChecks.get(key) === check) {
+        this.preflightChecks.delete(key)
+      }
+    }
+  }
+
+  listTemplates(store?: GalleyStore): GalleyTemplateBlueprint[] {
+    const byId = new Map<string, GalleyTemplateBlueprint>()
+    for (const t of BUILTIN_TEMPLATES) byId.set(t.id, t)
+    for (const [id, t] of this.pluginTemplates) byId.set(id, t)
+    if (store) {
+      for (const t of store.listSavedTemplates()) {
+        byId.set(t.id, { ...t, source: 'workspace' })
+      }
+    }
+    return [...byId.values()]
+  }
+
+  getTemplate(id: string, store?: GalleyStore): GalleyTemplateBlueprint | null {
+    const all = this.listTemplates(store)
+    return all.find((t) => t.id === id) ?? null
+  }
+
+  runPreflight(
+    packet: GalleyPacket,
+    proofs: Record<SheetId, { overflowLinesOnLastPage?: number } | null> | undefined,
+    cwd: string,
+  ): GalleyPreflightWarning[] {
+    const warnings: GalleyPreflightWarning[] = []
+
+    // 1. Stale dependency edges
+    for (const sid of packet.sheetOrder) {
+      const sh = packet.sheets[sid]
+      if (!sh) continue
+      for (const b of sh.blocks) {
+        if (b.stale) {
+          warnings.push({
+            code: 'GALLEY_STALE_BLOCK',
+            severity: 'warn',
+            sheetId: sid,
+            blockId: b.id,
+            message:
+              b.stale.state === 'stale_missing_origin'
+                ? `Block ${b.id} verweist auf entfernten Block ${b.stale.origin}`
+                : `Block ${b.id} ist veraltet (Ursprung ${b.stale.origin} wurde geändert)`,
+          })
+        }
+      }
+    }
+
+    // 2. Tasks without a linked answer on multi-sheet packets (e.g. Arbeitsblatt + Erwartungshorizont)
+    if (packet.sheetOrder.length >= 2) {
+      const answeredTaskIds = new Set<BlockId>()
+      for (const sid of packet.sheetOrder) {
+        for (const b of packet.sheets[sid]?.blocks ?? []) {
+          if (b.type === 'answer') {
+            for (const dep of b.dependsOn ?? []) answeredTaskIds.add(dep.id)
+          }
+        }
+      }
+      const primarySid = packet.sheetOrder[0]
+      for (const b of packet.sheets[primarySid]?.blocks ?? []) {
+        if (b.type === 'task' && !answeredTaskIds.has(b.id)) {
+          warnings.push({
+            code: 'GALLEY_UNANSWERED_TASK',
+            severity: 'info',
+            sheetId: primarySid,
+            blockId: b.id,
+            message: `Aufgabe ${b.id} hat noch keine verknüpfte Lösung (dependsOn) auf einem Folgebogen`,
+          })
+        }
+      }
+    }
+
+    // 3. Page overflow against targetPages
+    if (proofs) {
+      for (const sid of packet.sheetOrder) {
+        const pr = proofs[sid]
+        const target = packet.sheets[sid]?.geometry?.targetPages
+        if (pr && (pr.overflowLinesOnLastPage ?? 0) > 0) {
+          warnings.push({
+            code: 'GALLEY_PAGE_OVERFLOW',
+            severity: 'warn',
+            sheetId: sid,
+            message: `Bogen "${packet.sheets[sid]?.title ?? sid}" überschreitet Ziel (${target ?? '?'} S.) um +${pr.overflowLinesOnLastPage} Zeilen`,
+          })
+        }
+      }
+    }
+
+    // 4. Companion leaf-plugin checks (fail-open so a third-party check never breaks the host)
+    for (const [, fn] of this.preflightChecks) {
+      try {
+        const extra = fn(packet, cwd)
+        if (Array.isArray(extra)) warnings.push(...extra)
+      } catch {
+        /* fail-open */
+      }
+    }
+
+    return warnings
+  }
+
+  toCordisService(): GalleyService {
+    return {
+      registerTemplate: (bp) => this.registerTemplate(bp),
+      listTemplates: (cwd) => {
+        const { store } = getStoreForCwd(cwd)
+        return this.listTemplates(store)
+      },
+      registerPreflight: (id, check) => this.registerPreflight(id, check),
+      getStore: (cwd) => getStoreForCwd(cwd).store,
+    }
+  }
+
+  _resetForTests(): void {
+    this.pluginTemplates.clear()
+    this.preflightChecks.clear()
+  }
+}
+
+export const defaultGalleyRegistry = new GalleyServiceRegistry()

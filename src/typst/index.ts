@@ -439,9 +439,13 @@ export interface CompileSheetResult {
 function preamble(sheet: GalleySheet): string[] {
   const g = sheet.geometry
   const m = g.margin
+  const isLandscape = g.orientation === 'landscape'
   const L: string[] = []
-  L.push(`// galley preamble — sheet ${sheet.id} "${sheet.title}" (${g.paper}, margins ${m.top}/${m.right}/${m.bottom}/${m.left} cm)`)
-  L.push(`#set page(paper: ${typString(g.paper)}, margin: (top: ${m.top}cm, bottom: ${m.bottom}cm, left: ${m.left}cm, right: ${m.right}cm))`)
+  L.push(
+    `// galley preamble — sheet ${sheet.id} "${sheet.title}" (${g.paper}${isLandscape ? ' landscape' : ''}, margins ${m.top}/${m.right}/${m.bottom}/${m.left} cm)`,
+  )
+  const flippedArg = isLandscape ? ', flipped: true' : ''
+  L.push(`#set page(paper: ${typString(g.paper)}${flippedArg}, margin: (top: ${m.top}cm, bottom: ${m.bottom}cm, left: ${m.left}cm, right: ${m.right}cm))`)
   L.push(`#set text(size: 10pt, lang: "de")`)
   L.push(`#set par(justify: true, leading: 0.75em)`)
   L.push(`#set heading(numbering: none)`)
@@ -455,7 +459,10 @@ function preamble(sheet: GalleySheet): string[] {
 
 /** Deterministic pure function: sheet → `.typ` (spec 03 §4; M1.6). */
 export function compileSheet(sheet: GalleySheet, assets?: Record<string, unknown>): CompileSheetResult {
-  const dim = PAPER_PT[sheet.geometry.paper]
+  const rawDim = PAPER_PT[sheet.geometry.paper]
+  const isLandscape = sheet.geometry.orientation === 'landscape'
+  const pageWidthPt = isLandscape ? rawDim.h : rawDim.w
+  const pageHeightPt = isLandscape ? rawDim.w : rawDim.h
   const lines: string[] = [...preamble(sheet), '']
   const anchors: { blockId: BlockId; hex: string }[] = []
   let taskCount = 0
@@ -468,8 +475,8 @@ export function compileSheet(sheet: GalleySheet, assets?: Record<string, unknown
   return {
     typ: lines.join('\n'),
     anchors,
-    pageHeightPt: dim.h,
-    pageWidthPt: dim.w,
+    pageHeightPt,
+    pageWidthPt,
     targetPages: sheet.geometry.targetPages,
   }
 }

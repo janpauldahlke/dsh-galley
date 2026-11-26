@@ -6,20 +6,21 @@
  * exact handler on `node:http` and verify 200/304/409/404 contracts directly.
  */
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { join } from 'node:path'
+import { basename, extname, resolve, sep } from 'node:path'
 import { URL } from 'node:url'
 import {
+  DOWNLOAD_ROUTE,
   EDIT_ROUTE,
   EXPORT_ROUTE,
   PROPOSAL_ROUTE_PREFIX,
   STATE_ROUTE,
   type AssetMeta,
   type BlockId,
-  type ExportFileReceipt,
   type GalleyPacket,
   type LayoutSlot,
+  type ReviewMode,
   type SheetId,
   type StateActivePayload,
   type StateEmptyPayload,
@@ -27,6 +28,7 @@ import {
   type StateSheetView,
 } from '../shared/types.ts'
 import { compileSheet, mapDiagnosticsToBlocks } from '../typst/index.ts'
+import { defaultGalleyRegistry, type GalleyServiceRegistry } from './service.ts'
 import { StoreError, findBlock } from './store.ts'
 import {
   Err,
@@ -51,6 +53,7 @@ export interface GalleyHttpDispatcherDeps {
     root: string
     cwd: string
   }>
+  registry?: GalleyServiceRegistry
 }
 
 interface CachedPacketProofs {
@@ -162,14 +165,19 @@ function extForMime(mimeType: string): string {
   }
 }
 
-function slugify(title: string): string {
-  const s = title
-    .normalize('NFKD')
-    .replace(/[^\w\s-]/g, '')
-    .trim()
-    .replace(/[\s_]+/g, '-')
-    .toLowerCase()
-  return s || 'galley'
+function contentTypeForExt(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case '.pdf':
+      return 'application/pdf'
+    case '.docx':
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    case '.typ':
+    case '.tex':
+    case '.md':
+      return 'text/plain; charset=utf-8'
+    default:
+      return 'application/octet-stream'
+  }
 }
 
 async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket): Promise<StateProofView[]> {
@@ -230,6 +238,7 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
 
 export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
   const proofCache = new Map<string, CachedPacketProofs>()
+  const registry = hostDeps.registry ?? defaultGalleyRegistry
 
   async function getCachedProofs(root: string, deps: GalleyToolsDeps, packet: GalleyPacket): Promise<StateProofView[]> {
     const key = `${root}::${packet.id}`
@@ -266,12 +275,14 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
     const activePid = explicitPid ?? store.getActivePacket()
     const packet = activePid ? store.load(activePid) : null
+    const templates = registry.listTemplates(store)
     if (!packet) {
       const empty: StateEmptyPayload = {
         ok: true,
         activePacket: false,
         cwd,
         packets,
+        templates,
         rev: 0,
         packetId: null,
       }
@@ -310,20 +321,28 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         geometry: sh.geometry,
         blocks: sh.blocks,
         annotations: allAnnotations.filter((a) => blockIds.has(a.blockId)),
-        proposals: allProposals.filter((p) => blockIds.has(p.targetBlockId)),
+        proposals: allProposals.filter((p) =>
+          p.op === 'insert' ? (p.sheetId ?? packet.sheetOrder[0]) === sh.id : blockIds.has(p.targetBlockId),
+        ),
       })
     }
 
     const proofs = await getCachedProofs(root, deps, packet)
+    const proofMap: Record<SheetId, { overflowLinesOnLastPage?: number } | null> = {}
+    for (const pr of proofs) proofMap[pr.sheetId] = pr
+    const preflight = registry.runPreflight(packet, proofMap, cwd)
+
     const payload: StateActivePayload = {
       ok: true,
       activePacket: true,
       cwd,
       packets,
+      templates,
       rev: packet.rev,
       packetId: packet.id,
       template: packet.template,
       title: packet.title,
+      reviewMode: packet.reviewMode ?? 'auto',
       activeSheetId: packet.sheetOrder[0] ?? 's1',
       sheetOrder: packet.sheetOrder,
       assets: packet.assets ?? {},
@@ -331,6 +350,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       redoDepth: store.redoDepth(packet.id),
       sheets,
       staleDependents,
+      preflight,
       proofs,
     }
     sendJson(res, 200, payload)
@@ -361,19 +381,52 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     try {
       // 1. Route-only op: open / switch Mappe
       if (op === 'open') {
-        const result = await galleyOpen(deps, {
-          id: typeof body.id === 'string' ? body.id : undefined,
-          template: body.template as 'arbeitsblatt' | 'rfc' | 'generic' | undefined,
-          title: typeof body.title === 'string' ? body.title : undefined,
-          targetPages: typeof body.targetPages === 'number' ? body.targetPages : undefined,
-          blocks: Array.isArray(body.blocks) ? (body.blocks as Record<string, unknown>[]) : undefined,
-          origin: source,
-        })
+        const result = await galleyOpen(
+          { ...deps, registry },
+          {
+            id: typeof body.id === 'string' ? body.id : undefined,
+            template: typeof body.template === 'string' ? body.template : undefined,
+            title: typeof body.title === 'string' ? body.title : undefined,
+            orientation: body.orientation === 'landscape' ? 'landscape' : body.orientation === 'portrait' ? 'portrait' : undefined,
+            targetPages: typeof body.targetPages === 'number' ? body.targetPages : undefined,
+            blocks: Array.isArray(body.blocks) ? (body.blocks as Record<string, unknown>[]) : undefined,
+            origin: source,
+          },
+        )
         if (!result.ok) {
           sendFailure(res, result)
           return
         }
         sendJson(res, 200, result)
+        return
+      }
+
+      // 1b. Route-only op: template-delete (does not require an active packet)
+      if (op === 'template-delete') {
+        const tid = typeof body.templateId === 'string' ? body.templateId.trim() : ''
+        if (!tid) {
+          sendFailure(res, { ok: false, code: Err.INVALID_PARAMS, message: 'templateId required' })
+          return
+        }
+        const removed = store.deleteSavedTemplate(tid)
+        sendJson(res, 200, { ok: true, deleted: removed, templates: registry.listTemplates(store) })
+        return
+      }
+
+      // 1c. Route-only op: packet-delete (may delete any packet id or active packet)
+      if (op === 'packet-delete') {
+        const targetId = packetIdArg ?? store.getActivePacket()
+        if (!targetId) {
+          sendFailure(res, { ok: false, code: Err.NO_ACTIVE_PACKET, message: 'no packet to delete' })
+          return
+        }
+        store.delete(targetId)
+        sendJson(res, 200, {
+          ok: true,
+          deletedId: targetId,
+          activePacketId: store.getActivePacket(),
+          packets: store.list(),
+        })
         return
       }
 
@@ -386,6 +439,61 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       const packet = store.load(pid)
       if (!packet) {
         sendFailure(res, { ok: false, code: Err.PACKET_NOT_FOUND, message: `packet ${pid} not found` })
+        return
+      }
+
+      // 2. Route-only Mappe CRUD & Review Mode ops
+      if (op === 'packet-rename') {
+        const updated = store.renamePacket(pid, typeof body.title === 'string' ? body.title : '')
+        sendJson(res, 200, { ok: true, packetId: pid, rev: updated.rev, title: updated.title })
+        return
+      }
+      if (op === 'packet-duplicate') {
+        const dup = store.duplicatePacket(pid, typeof body.title === 'string' ? body.title : undefined)
+        sendJson(res, 200, { ok: true, packetId: dup.id, rev: dup.rev, title: dup.title })
+        return
+      }
+      if (op === 'packet-set-review-mode') {
+        const mode = body.reviewMode as ReviewMode
+        const updated = store.setReviewMode(pid, mode)
+        sendJson(res, 200, { ok: true, packetId: pid, rev: updated.rev, reviewMode: updated.reviewMode ?? 'auto' })
+        return
+      }
+      if (op === 'template-save') {
+        const bp = store.saveAsTemplate(pid, {
+          id: typeof body.templateId === 'string' ? body.templateId : undefined,
+          title: typeof body.title === 'string' ? body.title : undefined,
+          description: typeof body.description === 'string' ? body.description : undefined,
+        })
+        sendJson(res, 200, { ok: true, template: bp, templates: registry.listTemplates(store) })
+        return
+      }
+
+      // 2b. Route-only Sheet CRUD ops
+      if (op === 'sheet-add') {
+        const out = store.addSheet(pid, {
+          title: typeof body.title === 'string' ? body.title : undefined,
+          orientation: body.orientation === 'landscape' ? 'landscape' : 'portrait',
+          targetPages: typeof body.targetPages === 'number' ? body.targetPages : undefined,
+          paper: body.paper === 'letter' ? 'letter' : 'a4',
+        })
+        sendJson(res, 200, { ok: true, packetId: pid, rev: out.packet.rev, sheetId: out.sheetId })
+        return
+      }
+      if (op === 'sheet-rename') {
+        const out = store.renameSheet(pid, String(body.sheetId ?? ''), typeof body.title === 'string' ? body.title : '')
+        sendJson(res, 200, { ok: true, packetId: pid, rev: out.rev })
+        return
+      }
+      if (op === 'sheet-remove') {
+        const out = store.removeSheet(pid, String(body.sheetId ?? ''))
+        sendJson(res, 200, { ok: true, packetId: pid, rev: out.rev, sheetOrder: out.sheetOrder })
+        return
+      }
+      if (op === 'sheet-reorder') {
+        const dir = body.direction === 'left' ? 'left' : 'right'
+        const out = store.reorderSheet(pid, String(body.sheetId ?? ''), dir)
+        sendJson(res, 200, { ok: true, packetId: pid, rev: out.rev, sheetOrder: out.sheetOrder })
         return
       }
 
@@ -443,6 +551,9 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
           }
           if (body.paper === 'a4' || body.paper === 'letter') {
             sh.geometry.paper = body.paper
+          }
+          if (body.orientation === 'portrait' || body.orientation === 'landscape') {
+            sh.geometry.orientation = body.orientation
           }
           return null
         })
@@ -629,8 +740,21 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     }
 
     const action = typeof body.action === 'string' ? body.action : ''
+    if (proposalId === '_all' || action === 'accept-all') {
+      const summary = store.acceptAllProposals(pid)
+      const reloaded = store.load(pid)!
+      const proofs = await getCachedProofs(root, deps, reloaded)
+      sendJson(res, 200, {
+        ok: true,
+        accepted: summary.accepted,
+        conflicted: summary.conflicted,
+        rev: summary.rev,
+        proofs,
+      })
+      return
+    }
     if (action !== 'accept' && action !== 'revert' && action !== 'reject') {
-      sendFailure(res, { ok: false, code: Err.INVALID_PARAMS, message: 'action must be accept or revert' })
+      sendFailure(res, { ok: false, code: Err.INVALID_PARAMS, message: 'action must be accept, revert, or accept-all' })
       return
     }
 
@@ -688,55 +812,73 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
     const cwdParam = (typeof body.cwd === 'string' ? body.cwd : url.searchParams.get('cwd'))?.trim() || null
     if (cwdParam) noteGalleyCwd(cwdParam)
-    const { deps, root, cwd } = await hostDeps.getDepsForCwd(cwdParam)
-    const { store } = deps
-
-    const pid = (typeof body.packetId === 'string' ? body.packetId : undefined) ?? store.getActivePacket()
-    if (!pid) {
-      sendFailure(res, { ok: false, code: Err.NO_ACTIVE_PACKET, message: 'no active packet' })
-      return
-    }
-    const packet = store.load(pid)
-    if (!packet) {
-      sendFailure(res, { ok: false, code: Err.PACKET_NOT_FOUND, message: `packet ${pid} not found` })
-      return
-    }
+    const { deps, cwd } = await hostDeps.getDepsForCwd(cwdParam)
 
     const format = typeof body.format === 'string' ? (body.format as 'pdf' | 'docx' | 'typ' | 'tex' | 'md') : 'pdf'
-    const sheetIds = Array.isArray(body.sheetIds) && body.sheetIds.length > 0
-      ? (body.sheetIds.filter((s): s is string => typeof s === 'string') as SheetId[])
-      : typeof body.sheetId === 'string'
-        ? [body.sheetId]
-        : packet.sheetOrder
+    const sheetIds =
+      Array.isArray(body.sheetIds) && body.sheetIds.length > 0
+        ? (body.sheetIds.filter((s): s is string => typeof s === 'string') as SheetId[])
+        : undefined
+    const sheetId = typeof body.sheetId === 'string' ? body.sheetId : undefined
+    const packetId = typeof body.packetId === 'string' ? body.packetId : undefined
 
-    const outDir = join(cwd, 'galley-exports')
-    mkdirSync(outDir, { recursive: true })
-    const slug = slugify(packet.title)
-    const proofs = await getCachedProofs(root, deps, packet)
-    const files: ExportFileReceipt[] = []
+    const result = await galleyExport(deps, {
+      packetId,
+      sheetId,
+      sheetIds,
+      format,
+      outDir: cwd,
+    })
+    if (!result.ok) {
+      sendFailure(res, result)
+      return
+    }
+    sendJson(res, 200, {
+      ok: true,
+      packetId: packetId ?? deps.store.getActivePacket(),
+      format: result.format,
+      files: result.files ?? [],
+    })
+  }
 
-    for (const sid of sheetIds) {
-      const result = await galleyExport(deps, { packetId: pid, sheetId: sid, format })
-      if (!result.ok) {
-        sendFailure(res, result)
-        return
-      }
-      const bytes = result.bytes ?? Buffer.from(result.text ?? '', 'utf8')
-      const filename = sheetIds.length === 1 && sid === 's1' ? `${slug}.${format}` : `${slug}-${sid}.${format}`
-      const relPath = `galley-exports/${filename}`
-      writeFileSync(join(cwd, relPath), bytes)
-      const sheetProof = proofs.find((p) => p.sheetId === sid)
-      files.push({
-        sheetId: sid,
-        path: relPath,
-        format,
-        pages: format === 'pdf' ? (sheetProof?.pages ?? null) : null,
-        sizeBytes: bytes.length,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-      })
+  async function handleDownload(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { ok: false, code: Err.INVALID_PARAMS, message: 'method not allowed', fields: {} })
+      return
+    }
+    const cwdParam = url.searchParams.get('cwd')?.trim() || null
+    if (cwdParam) noteGalleyCwd(cwdParam)
+    const { cwd } = await hostDeps.getDepsForCwd(cwdParam)
+    const relPath = url.searchParams.get('path')?.trim() ?? ''
+    if (!relPath) {
+      sendFailure(res, { ok: false, code: Err.INVALID_PARAMS, message: 'path query parameter required' })
+      return
     }
 
-    sendJson(res, 200, { ok: true, packetId: pid, rev: packet.rev, files })
+    const exportsRoot = resolve(cwd, 'galley-exports')
+    const targetAbs = resolve(cwd, relPath)
+    if (!targetAbs.startsWith(exportsRoot + sep)) {
+      sendFailure(res, {
+        ok: false,
+        code: Err.INVALID_PARAMS,
+        message: 'download path must reside inside galley-exports/',
+      })
+      return
+    }
+    if (!existsSync(targetAbs) || !statSync(targetAbs).isFile()) {
+      sendFailure(res, { ok: false, code: Err.EXPORT_FAILED, message: `exported file '${relPath}' not found` })
+      return
+    }
+
+    const bytes = readFileSync(targetAbs)
+    const safeName = basename(targetAbs).replace(/[^A-Za-z0-9._-]/g, '_')
+    res.writeHead(200, {
+      'content-type': contentTypeForExt(extname(targetAbs)),
+      'content-length': String(bytes.length),
+      'content-disposition': `attachment; filename="${safeName}"`,
+      'cache-control': 'no-store',
+    })
+    res.end(bytes)
   }
 
   return async function dispatch(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
@@ -753,6 +895,10 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     }
     if (pathname === EXPORT_ROUTE) {
       await handleExport(req, res, url)
+      return true
+    }
+    if (pathname === DOWNLOAD_ROUTE) {
+      await handleDownload(req, res, url)
       return true
     }
     if (pathname.startsWith(PROPOSAL_ROUTE_PREFIX + '/')) {

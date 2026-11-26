@@ -23,10 +23,12 @@ import type {
   LayoutSlot,
 } from '../shared/types.ts'
 import {
+  applyCommitOutcome,
   blockToDraftBuffer,
   draftBufferToPatch,
   reconcileDraftBuffer,
   type BlockDraftBuffer,
+  type CommitOutcome,
 } from './paneModel.ts'
 
 export interface BlockEditorProps {
@@ -34,7 +36,7 @@ export interface BlockEditorProps {
   allBlockIds: BlockId[]
   assets: Record<AssetId, AssetMeta>
   busy: boolean
-  onCommitPatch: (blockId: BlockId, patch: Record<string, unknown>, baseHash?: string) => Promise<void>
+  onCommitPatch: (blockId: BlockId, patch: Record<string, unknown>, baseHash?: string) => Promise<CommitOutcome>
   onUploadAsset: (args: {
     blockId: BlockId
     slotMode: 'media-right' | 'media-left'
@@ -111,8 +113,8 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
   const commitNow = async (ignoreBaseHash = false): Promise<void> => {
     if (!draft.dirty && !ignoreBaseHash) return
     const patch = draftBufferToPatch(draft)
-    await onCommitPatch(block.id, patch, ignoreBaseHash ? undefined : draft.baseHash)
-    setDraft((prev) => ({ ...prev, dirty: false, conflict: false }))
+    const outcome = await onCommitPatch(block.id, patch, ignoreBaseHash ? undefined : draft.baseHash)
+    setDraft((prev) => applyCommitOutcome(prev, outcome))
   }
 
   const handleContainerBlur = (e: FocusEvent<HTMLDivElement>): void => {

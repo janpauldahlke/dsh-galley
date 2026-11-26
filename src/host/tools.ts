@@ -12,6 +12,8 @@
  * (headless store-logic tests). With it, receipts are derived per sheet.
  */
 import { createHash, randomBytes } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type {
   GalleyPacket,
   GalleySheet,
@@ -25,6 +27,9 @@ import type {
   GalleyProposal,
   GalleyAnnotation,
   BlockOutline,
+  ExportFileReceipt,
+  GalleyPreflightWarning,
+  ReviewMode,
 } from '../shared/types.ts'
 import {
   GalleyStore,
@@ -36,6 +41,12 @@ import {
 import { compileSheet, splitSvgPages } from '../typst/index.ts'
 import { serializeInlines, parseInlines } from '../shared/inlineMarkup.ts'
 import { createGalleyHttpDispatcher, httpStatusForCode } from './httpDispatch.ts'
+import {
+  GalleyServiceRegistry,
+  defaultGalleyRegistry,
+  BUILTIN_TEMPLATES,
+  type GalleyService,
+} from './service.ts'
 import {
   getStoreForCwd,
   noteGalleyCwd,
@@ -50,12 +61,16 @@ export {
   parseInlines,
   createGalleyHttpDispatcher,
   httpStatusForCode,
+  GalleyServiceRegistry,
+  defaultGalleyRegistry,
+  BUILTIN_TEMPLATES,
   getStoreForCwd,
   noteGalleyCwd,
   resolveGalleyCwd,
   resolveGalleyRoot,
   _resetGalleyWorkspaceForTests,
 }
+export type { GalleyService }
 
 // Re-export the store's public API so a single built artifact (`galley-core.mjs`)
 // serves both the six tools and the hermetic store tests.
@@ -404,11 +419,10 @@ async function computeProofs(
 
 export interface GalleyToolsDeps {
   store: GalleyStore
-  /** Arm renderer (spec 03 §2). May be sync or async; the tools await it.
-   *  `assetBytes` (optional) maps asset-relative paths (e.g. `assets/a1.png`)
-   *  to raw bytes, which the arm injects into the compiler's virtual FS so
-   *  `#image(…)` resolves without the file on disk (M1.5 H2). */
+  /** Arm renderer (spec 03 §2). May be sync or async; the tools await it. */
   render?: (sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>) => SheetRender | Promise<SheetRender>
+  registry?: GalleyServiceRegistry
+  cwd?: string
   now?: () => string
 }
 
@@ -417,17 +431,13 @@ export interface GalleyToolsDeps {
 export interface OpenArgs {
   /** Switch active packet to an existing packet id (exclusive with create fields, spec 02 §4.1). */
   id?: string
-  template?: 'arbeitsblatt' | 'rfc' | 'generic'
+  template?: string
   title?: string
+  orientation?: 'portrait' | 'landscape'
   blocks?: Record<string, unknown>[]
   targetPages?: number
   /** Provenance for initial `blocks` (default 'human' for pane/hermetic seed; 'agent' from LLM tool). */
   origin?: 'human' | 'agent'
-  /**
-   * Assets to stage with the packet (metadata only; the pane supplies real
-   * bytes via `store.addAsset`). M1 headless stages empty buffers so the
-   * per-packet asset limit (GALLEY_ASSET_LIMIT_EXCEEDED) is reachable.
-   */
   assets?: { id: string; path: string; mimeType: string; size?: number }[]
 }
 
@@ -435,7 +445,8 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
   packetId: string
   rev: number
   title: string
-  template: GalleyPacket['template']
+  template: string
+  reviewMode: ReviewMode
   sheetOrder: SheetId[]
   blocks: Record<SheetId, BlockOutline[]>
   active: true
@@ -443,7 +454,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
 }> | ToolFailure> {
   const { store } = deps
   if (args.id !== undefined) {
-    if (args.template || args.title || args.blocks || args.targetPages !== undefined || args.assets) {
+    if (args.template || args.title || args.orientation || args.blocks || args.targetPages !== undefined || args.assets) {
       return fail(Err.INVALID_PARAMS, 'id is exclusive with packet creation fields')
     }
     const existing = store.load(args.id)
@@ -457,6 +468,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       rev: existing.rev,
       title: existing.title,
       template: existing.template,
+      reviewMode: existing.reviewMode ?? 'auto',
       sheetOrder: existing.sheetOrder,
       blocks,
       active: true,
@@ -465,71 +477,120 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
   }
   const template = args.template ?? 'generic'
   const seedOrigin = args.origin ?? 'human'
+  const registry = deps.registry ?? defaultGalleyRegistry
+  const isBuiltin = template === 'arbeitsblatt' || template === 'rfc' || template === 'generic'
+  const customBlueprint = !isBuiltin ? registry.getTemplate(template, store) : null
+  if (!isBuiltin && !customBlueprint) {
+    return fail(Err.INVALID_PARAMS, `unknown template '${template}'`)
+  }
+
   try {
     const id = 'p-' + base32(randomBytes(8), 8)
-    const sheetId: SheetId = 's1'
-    const sheet: GalleySheet = {
-      id: sheetId,
-      title: args.title ?? (template === 'arbeitsblatt' ? 'Arbeitsblatt' : 'Document'),
-      geometry: {
-        paper: 'a4',
-        margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
-        targetPages: args.targetPages ?? (template === 'arbeitsblatt' ? 1 : undefined),
-      },
-      blocks: [],
-    }
+    const packetTitle =
+      args.title ??
+      (customBlueprint
+        ? customBlueprint.title
+        : template === 'arbeitsblatt'
+          ? 'Arbeitsblatt'
+          : 'Document')
+
     const packet: GalleyPacket = {
       id,
       template,
-      title: args.title ?? (template === 'arbeitsblatt' ? 'Arbeitsblatt' : 'Document'),
+      title: packetTitle,
+      reviewMode: 'auto',
       rev: 0,
       createdAt: '',
       updatedAt: '',
-      sheetOrder: [sheetId],
-      sheets: { [sheetId]: sheet },
+      sheetOrder: [],
+      sheets: {},
       nextBlockSeq: 1,
       nextProposalSeq: 1,
       nextAnnotationSeq: 1,
       nextAssetSeq: 1,
       assets: {},
     }
-    // Arbeitsblatt 2-sheet template (spec 01 §1, M1.6): scaffold s1 (Arbeitsblatt,
-    // targetPages: 1) and s2 (Erwartungshorizont, unbounded) with minimal starter blocks.
-    if (template === 'arbeitsblatt') {
-      const s2Id: SheetId = 's2'
-      packet.sheets[s2Id] = {
-        id: s2Id,
-        title: 'Erwartungshorizont',
-        geometry: { paper: 'a4', margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 } },
+
+    if (customBlueprint) {
+      const bpSheets = customBlueprint.sheets.length > 0
+        ? customBlueprint.sheets
+        : [{ id: 's1', title: packetTitle, geometry: { paper: 'a4' as const, margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 } }, starterBlocks: [] }]
+      for (let idx = 0; idx < bpSheets.length; idx++) {
+        const bs = bpSheets[idx]
+        const sid: SheetId = bs.id || `s${idx + 1}`
+        packet.sheetOrder.push(sid)
+        packet.sheets[sid] = {
+          id: sid,
+          title: bs.title || `Sheet ${idx + 1}`,
+          geometry: {
+            ...JSON.parse(JSON.stringify(bs.geometry)),
+            ...(idx === 0 && args.orientation ? { orientation: args.orientation } : {}),
+            ...(idx === 0 && args.targetPages !== undefined ? { targetPages: args.targetPages } : {}),
+          },
+          blocks: [],
+        }
+        for (const raw of bs.starterBlocks ?? []) {
+          const clonedRaw = JSON.parse(JSON.stringify(raw)) as Record<string, unknown>
+          if (clonedRaw.type === 'header' && args.title && clonedRaw.fields && typeof clonedRaw.fields === 'object') {
+            ;(clonedRaw.fields as Record<string, unknown>).titel = args.title
+          }
+          const { block, error } = buildBlock(packet, clonedRaw, seedOrigin)
+          if (error) return fail(toStoreCode(error), `template starter block: ${error}`)
+          packet.sheets[sid].blocks.push(block)
+          packet.nextBlockSeq += 1
+        }
+      }
+    } else {
+      const sheetId: SheetId = 's1'
+      const sheet: GalleySheet = {
+        id: sheetId,
+        title: packetTitle,
+        geometry: {
+          paper: 'a4',
+          ...(args.orientation ? { orientation: args.orientation } : {}),
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+          targetPages: args.targetPages ?? (template === 'arbeitsblatt' ? 1 : undefined),
+        },
         blocks: [],
       }
-      packet.sheetOrder.push(s2Id)
-      const scaffold = (sid: SheetId, raw: Record<string, unknown>): ToolFailure | undefined => {
-        const { block, error } = buildBlock(packet, raw, 'agent')
-        if (error) return fail(toStoreCode(error), `arbeitsblatt scaffold block: ${error}`)
-        packet.sheets[sid].blocks.push(block)
-        packet.nextBlockSeq += 1
-        return undefined
+      packet.sheetOrder = [sheetId]
+      packet.sheets[sheetId] = sheet
+
+      if (template === 'arbeitsblatt') {
+        const s2Id: SheetId = 's2'
+        packet.sheets[s2Id] = {
+          id: s2Id,
+          title: 'Erwartungshorizont',
+          geometry: { paper: 'a4', margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 } },
+          blocks: [],
+        }
+        packet.sheetOrder.push(s2Id)
+        const scaffold = (sid: SheetId, raw: Record<string, unknown>): ToolFailure | undefined => {
+          const { block, error } = buildBlock(packet, raw, 'agent')
+          if (error) return fail(toStoreCode(error), `arbeitsblatt scaffold block: ${error}`)
+          packet.sheets[sid].blocks.push(block)
+          packet.nextBlockSeq += 1
+          return undefined
+        }
+        const r1 = scaffold(sheetId, { type: 'header', fields: { titel: packet.title, fach: '', klasse: '', datum: '', name: '' } })
+        if (r1) return r1
+        const r2 = scaffold(sheetId, { type: 'task', body: 'Erste Aufgabe' })
+        if (r2) return r2
+        const r3 = scaffold(s2Id, { type: 'heading', level: 1, body: 'Erwartungshorizont' })
+        if (r3) return r3
+        const r4 = scaffold(s2Id, { type: 'answer', body: 'Lösung', dependsOn: [{ id: 'b2', sinceHash: packet.sheets[sheetId].blocks[1].hash, at: new Date().toISOString() }] })
+        if (r4) return r4
       }
-      const r1 = scaffold(sheetId, { type: 'header', fields: { titel: packet.title, fach: '', klasse: '', datum: '', name: '' } })
-      if (r1) return r1
-      const r2 = scaffold(sheetId, { type: 'task', body: 'Erste Aufgabe' })
-      if (r2) return r2
-      const r3 = scaffold(s2Id, { type: 'heading', level: 1, body: 'Erwartungshorizont' })
-      if (r3) return r3
-      const r4 = scaffold(s2Id, { type: 'answer', body: 'Lösung', dependsOn: [{ id: 'b2', sinceHash: packet.sheets[sheetId].blocks[1].hash, at: new Date().toISOString() }] })
-      if (r4) return r4
     }
+
+    const firstSheet = packet.sheets[packet.sheetOrder[0]]
     for (const raw of args.blocks ?? []) {
       const { block, error } = buildBlock(packet, raw, seedOrigin)
       if (error) return fail(toStoreCode(error), `block ${raw.id ?? '?'}: ${error}`)
-      sheet.blocks.push(block)
+      firstSheet.blocks.push(block)
       packet.nextBlockSeq += 1
     }
     store.create(packet)
-    // Stage declared assets (metadata; the pane later replaces the empty buffer
-    // with real bytes via `store.addAsset`). Exceeding the per-packet limit
-    // throws StoreError('asset_limit') → GALLEY_ASSET_LIMIT_EXCEEDED.
     for (const a of args.assets ?? []) {
       const bytes = Buffer.alloc(a.size ?? 0)
       store.addAsset(
@@ -549,6 +610,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       rev: loaded.rev,
       title: loaded.title,
       template: loaded.template,
+      reviewMode: loaded.reviewMode ?? 'auto',
       sheetOrder: loaded.sheetOrder,
       blocks,
       active: true,
@@ -567,11 +629,13 @@ export async function galleyStatus(deps: GalleyToolsDeps, args: StatusArgs): Pro
   packetId: string
   rev: number
   title: string
-  template: GalleyPacket['template']
+  template: string
+  reviewMode: ReviewMode
   sheetOrder: SheetId[]
   blocks: Record<SheetId, BlockOutline[]>
   proposals: GalleyProposal[]
   annotations: GalleyAnnotation[]
+  preflight: GalleyPreflightWarning[]
   proofs: Record<SheetId, SheetProofReceipt | null>
 }> | ToolFailure> {
   const pid = resolvePacketId(deps, args.packetId)
@@ -580,17 +644,25 @@ export async function galleyStatus(deps: GalleyToolsDeps, args: StatusArgs): Pro
   if (args.sheetId && !packet.sheets[args.sheetId]) return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
   const blocks: Record<SheetId, BlockOutline[]> = {}
   for (const sid of packet.sheetOrder) blocks[sid] = packet.sheets[sid].blocks.map(blockOutline)
+  const proofs = await computeProofs(deps, packet, args.sheetId)
+  const preflight = (deps.registry ?? defaultGalleyRegistry).runPreflight(
+    packet,
+    proofs,
+    deps.cwd ?? process.cwd(),
+  )
   return {
     ok: true,
     packetId: pid,
     rev: packet.rev,
     title: packet.title,
     template: packet.template,
+    reviewMode: packet.reviewMode ?? 'auto',
     sheetOrder: packet.sheetOrder,
     blocks,
     proposals: deps.store.listProposals(pid).filter((p) => p.status === 'pending'),
     annotations: deps.store.listAnnotations(pid).filter((a) => !a.resolved),
-    proofs: await computeProofs(deps, packet, args.sheetId),
+    preflight,
+    proofs,
   }
 }
 
@@ -653,7 +725,8 @@ function summary(b: Block): string {
 
 export interface EditBlockArgs {
   packetId?: string
-  sheetId: SheetId
+  /** Optional (spec 02 §4.4): resolved from `blockId`'s sheet or packet's first sheet when omitted. */
+  sheetId?: SheetId
   op: 'insert' | 'patch' | 'move' | 'remove'
   origin: 'human' | 'agent'
   // insert:
@@ -676,8 +749,8 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
   rev: number
   /** The block that was written (compact outline), or null (proposal path). */
   block: BlockOutline | null
-  /** The proposal recorded (patch on a human-origin block), if any. */
-  proposal: { id: string; targetBlockId: BlockId; status: 'pending' } | null
+  /** The proposal recorded (when reviewMode==='review' or agent patch on human block), if any. */
+  proposal: { id: string; op: string; targetBlockId: BlockId; status: 'pending' } | null
   proof: SheetProofReceipt | null
   /** Block ids now stale (StaleInfo != null) after this change. */
   staleDependents: BlockId[]
@@ -686,51 +759,113 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
   const pid = resolvePacketId(deps, args.packetId)
   if (typeof pid !== 'string') return pid
   const packet = store.load(pid)!
-  const sheet = packet.sheets[args.sheetId]
-  if (!sheet) return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
+
+  if (args.sheetId !== undefined && !packet.sheets[args.sheetId]) {
+    return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
+  }
+  const locatedPre = args.blockId ? findBlock(packet, args.blockId) : null
+  const resolvedSheetId: SheetId =
+    args.sheetId ?? (args.op !== 'insert' && locatedPre ? locatedPre.sheet.id : packet.sheetOrder[0])
+  const sheet = packet.sheets[resolvedSheetId]
+  if (!sheet) return fail(Err.SHEET_NOT_FOUND, `sheet ${resolvedSheetId} not found`)
 
   try {
-    // Proposal rule (spec 01 §7 / 02 §4.4): the decision is on the BLOCK's own
-    // origin, not the patcher's. A patch targeting a human-origin block is a
-    // proposal (applied:false); an agent-origin block is applied directly.
-    const prePatchOrigin =
-      args.op === 'patch' ? findBlock(packet, args.blockId!)?.block?.origin : undefined
+    const inReviewMode = (packet.reviewMode ?? 'auto') === 'review'
+    const prePatchOrigin = args.op === 'patch' ? locatedPre?.block?.origin : undefined
+    const shouldPropose =
+      args.origin === 'agent' && (inReviewMode || (args.op === 'patch' && prePatchOrigin === 'human'))
 
-    // Proposal rule (spec 01 §7 / 02 §4.4): an AGENT patch on a HUMAN-origin block
-    // stages a proposal (applied:false) — the block stays untouched until the human
-    // accepts or reverts. Direct human edits from the pane apply immediately.
-    if (args.op === 'patch' && args.origin === 'agent' && prePatchOrigin === 'human') {
-      const target = findBlock(packet, args.blockId!)
-      if (!target) return fail(Err.BLOCK_NOT_FOUND, `block ${args.blockId} not found`)
-      if (args.baseHash && args.baseHash !== target.block.hash) {
-        const t = fail(Err.PROPOSAL_CONFLICT, `block ${args.blockId} changed (base hash mismatch)`)
-        t.baseHash = args.baseHash
-        t.currentHash = target.block.hash
-        return t
-      }
-      const proposedPatch = args.patch ?? {}
-      const beforePatch: Record<string, unknown> = {}
-      const rawBlock = target.block as unknown as Record<string, unknown>
-      for (const k of Object.keys(proposedPatch)) {
-        if (k in rawBlock) beforePatch[k] = JSON.parse(JSON.stringify(rawBlock[k]))
-      }
+    if (shouldPropose) {
       const seq = store.listProposals(pid).length + 1
-      const prop: GalleyProposal = {
-        id: `prop-${seq}`,
-        targetBlockId: args.blockId!,
-        baseHash: target.block.hash,
-        beforePatch,
-        proposedPatch,
-        status: 'pending',
-        createdAtRev: packet.rev,
+      let prop: GalleyProposal
+
+      if (args.op === 'insert') {
+        if (!args.block) return fail(Err.INVALID_PARAMS, 'insert requires a block')
+        const { block: built, error } = buildBlock(packet, args.block, 'human')
+        if (error) return fail(toStoreCode(error), `invalid block: ${error}`)
+        prop = {
+          id: `prop-${seq}`,
+          op: 'insert',
+          sheetId: resolvedSheetId,
+          targetBlockId: built.id,
+          baseHash: '',
+          proposedPatch: { block: built, beforeId: args.beforeId },
+          status: 'pending',
+          createdAtRev: packet.rev,
+        }
+      } else {
+        if (!args.blockId) return fail(Err.INVALID_PARAMS, `${args.op} requires blockId`)
+        const target = locatedPre ?? findBlock(packet, args.blockId)
+        if (!target) return fail(Err.BLOCK_NOT_FOUND, `block ${args.blockId} not found`)
+        if (args.baseHash && args.baseHash !== target.block.hash) {
+          const t = fail(Err.PROPOSAL_CONFLICT, `block ${args.blockId} changed (base hash mismatch)`)
+          t.baseHash = args.baseHash
+          t.currentHash = target.block.hash
+          return t
+        }
+
+        if (args.op === 'patch') {
+          const proposedPatch = args.patch ?? {}
+          const beforePatch: Record<string, unknown> = {}
+          const rawBlock = target.block as unknown as Record<string, unknown>
+          for (const k of Object.keys(proposedPatch)) {
+            if (k in rawBlock) beforePatch[k] = JSON.parse(JSON.stringify(rawBlock[k]))
+          }
+          prop = {
+            id: `prop-${seq}`,
+            op: 'patch',
+            sheetId: target.sheet.id,
+            targetBlockId: target.block.id,
+            baseHash: target.block.hash,
+            beforePatch,
+            proposedPatch,
+            status: 'pending',
+            createdAtRev: packet.rev,
+          }
+        } else if (args.op === 'move') {
+          const targetSheetId = args.toSheetId ?? resolvedSheetId
+          if (!packet.sheets[targetSheetId]) return fail(Err.INVALID_PARAMS, 'target sheet not found')
+          prop = {
+            id: `prop-${seq}`,
+            op: 'move',
+            sheetId: target.sheet.id,
+            targetBlockId: target.block.id,
+            baseHash: target.block.hash,
+            beforePatch: { sheetId: target.sheet.id },
+            proposedPatch: {
+              toSheetId: targetSheetId,
+              toBeforeId: args.toBeforeId,
+              toAfterId: args.toAfterId,
+            },
+            status: 'pending',
+            createdAtRev: packet.rev,
+          }
+        } else {
+          // remove
+          prop = {
+            id: `prop-${seq}`,
+            op: 'remove',
+            sheetId: target.sheet.id,
+            targetBlockId: target.block.id,
+            baseHash: target.block.hash,
+            beforePatch: { type: target.block.type, preview: blockText(target.block).slice(0, 80) },
+            proposedPatch: { remove: true },
+            status: 'pending',
+            createdAtRev: packet.rev,
+          }
+        }
       }
+
       store.addProposal(pid, prop)
       const loadedProp = store.load(pid)!
       const renderProp = deps.render
       const proofProp = renderProp
         ? await (async () => {
             try {
-              return toReceipt(await renderProp(loadedProp.sheets[args.sheetId], loadedProp, assetBytesForPacket(deps, loadedProp)), loadedProp)
+              return toReceipt(
+                await renderProp(loadedProp.sheets[resolvedSheetId], loadedProp, assetBytesForPacket(deps, loadedProp)),
+                loadedProp,
+              )
             } catch {
               return null
             }
@@ -742,7 +877,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
         packetId: pid,
         rev: loadedProp.rev,
         block: null,
-        proposal: { id: prop.id, targetBlockId: prop.targetBlockId, status: 'pending' },
+        proposal: { id: prop.id, op: prop.op ?? 'patch', targetBlockId: prop.targetBlockId, status: 'pending' },
         proof: proofProp,
         staleDependents: staleBlockIds(loadedProp),
       }
@@ -750,12 +885,12 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
 
     const needsExpect = (args.op === 'patch' || args.op === 'remove' || args.op === 'move') && args.baseHash !== undefined
     let changedId: BlockId | null = null
-    let touchedSheetId: SheetId = args.sheetId
+    let touchedSheetId: SheetId = resolvedSheetId
     store.commit(
       pid,
       needsExpect ? { blockId: args.blockId ?? '', baseHash: args.baseHash! } : null,
       (p) => {
-        const sh = p.sheets[args.sheetId]
+        const sh = p.sheets[resolvedSheetId]
         switch (args.op) {
           case 'insert': {
             if (!args.block) throw new StoreError('invalid_op', 'insert requires a block')
@@ -806,9 +941,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
                 b[k] = v
               }
             }
-            // If this patch came from a direct human pane edit, human re-claims authorship (spec 01 §7).
             if (args.origin === 'human') b.origin = 'human'
-            // Re-validate after patch.
             if (b.body) {
               const e = validateInline(b.body as Inline[])
               if (e) throw new StoreError(e, 'inline limit')
@@ -821,7 +954,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             if (!id) throw new StoreError('invalid_op', 'move requires blockId')
             const from = findBlock(p, id)
             if (!from) throw new StoreError('not_found', `block ${id} not found`)
-            const targetSheet = p.sheets[args.toSheetId ?? args.sheetId]
+            const targetSheet = p.sheets[args.toSheetId ?? resolvedSheetId]
             if (!targetSheet) throw new StoreError('invalid_op', `target sheet not found`)
             from.sheet.blocks.splice(from.index, 1)
             let to = targetSheet.blocks.length
@@ -930,38 +1063,119 @@ export async function galleyAnnotate(deps: GalleyToolsDeps, args: AnnotateArgs):
 
 // ── Tool 6: galley_export ───────────────────────────────────────────────────
 
-export interface ExportArgs { packetId?: string; sheetId?: SheetId; format: 'pdf' | 'docx' | 'typ' | 'tex' | 'md' }
+export interface ExportArgs {
+  packetId?: string
+  sheetId?: SheetId
+  sheetIds?: SheetId[]
+  format: 'pdf' | 'docx' | 'typ' | 'tex' | 'md'
+  /** When supplied, materializes `<outDir>/galley-exports/<slug>.<ext>` and populates `files[]`. */
+  outDir?: string
+}
 
-export async function galleyExport(deps: GalleyToolsDeps, args: ExportArgs): Promise<Ok<{ format: string; text?: string; bytes?: Buffer }> | ToolFailure> {
+function exportSlug(title: string): string {
+  const s = title
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/[\s_]+/g, '-')
+    .toLowerCase()
+  return s || 'galley'
+}
+
+export async function galleyExport(
+  deps: GalleyToolsDeps,
+  args: ExportArgs,
+): Promise<Ok<{ format: string; text?: string; bytes?: Buffer; files?: ExportFileReceipt[] }> | ToolFailure> {
   const pid = resolvePacketId(deps, args.packetId)
   if (typeof pid !== 'string') return pid
   const packet = deps.store.load(pid)!
-  const sheetId = args.sheetId ?? packet.sheetOrder[0]
-  const sheet = packet.sheets[sheetId]
-  if (!sheet) return fail(Err.SHEET_NOT_FOUND, `sheet ${sheetId} not found`)
   if (!['typ', 'md', 'tex', 'pdf', 'docx'].includes(args.format)) {
     return fail(Err.INVALID_PARAMS, `unknown export format '${args.format}'`)
   }
+  if (args.format === 'docx') {
+    return fail(Err.EXPORT_FAILED, 'docx exporter lands in M4; use pdf or typ')
+  }
+
+  const targetIds: SheetId[] =
+    args.sheetIds && args.sheetIds.length > 0
+      ? args.sheetIds
+      : args.sheetId
+        ? [args.sheetId]
+        : args.outDir
+          ? packet.sheetOrder
+          : [packet.sheetOrder[0]]
+
+  for (const sid of targetIds) {
+    if (!packet.sheets[sid]) return fail(Err.SHEET_NOT_FOUND, `sheet ${sid} not found`)
+  }
+
   try {
-    switch (args.format) {
-      case 'typ':
-        // Pass the asset metadata so media slots emit a real #image(…) reference.
-        return { ok: true, format: 'typ', text: compileSheet(sheet, packet.assets).typ }
-      case 'md':
-        return { ok: true, format: 'md', text: toMarkdown(sheet) }
-      case 'tex':
-        return { ok: true, format: 'tex', text: toTex(sheet) }
-      case 'pdf':
-        if (!deps.render) return fail(Err.TYPST_COMPILE_ERROR, 'no render arm available for pdf')
-        const sr = await deps.render(sheet, packet, assetBytesForPacket(deps, packet))
-        if (!sr.pdf || sr.pdf.length === 0) return fail(Err.EXPORT_FAILED, 'render arm produced no pdf bytes')
-        return { ok: true, format: 'pdf', bytes: sr.pdf }
-      case 'docx':
-        // M1.5 H6: no .docx exporter in M1 — fail cleanly instead of faking
-        // one with Markdown bytes. The real exporter lands in M4.
-        return fail(Err.EXPORT_FAILED, 'docx exporter lands in M4; use pdf or typ')
-      default:
-        return fail(Err.INVALID_PARAMS, `unknown format`)
+    let firstText: string | undefined
+    let firstBytes: Buffer | undefined
+    const files: ExportFileReceipt[] = []
+    const slug = exportSlug(packet.title)
+    if (args.outDir) {
+      mkdirSync(join(args.outDir, 'galley-exports'), { recursive: true })
+    }
+
+    for (let i = 0; i < targetIds.length; i++) {
+      const sid = targetIds[i]
+      const sheet = packet.sheets[sid]
+      let text: string | undefined
+      let bytes: Buffer
+      let pages: number | null = null
+
+      switch (args.format) {
+        case 'typ':
+          text = compileSheet(sheet, packet.assets).typ
+          bytes = Buffer.from(text, 'utf8')
+          break
+        case 'md':
+          text = toMarkdown(sheet)
+          bytes = Buffer.from(text, 'utf8')
+          break
+        case 'tex':
+          text = toTex(sheet)
+          bytes = Buffer.from(text, 'utf8')
+          break
+        case 'pdf': {
+          if (!deps.render) return fail(Err.TYPST_COMPILE_ERROR, 'no render arm available for pdf')
+          const sr = await deps.render(sheet, packet, assetBytesForPacket(deps, packet))
+          if (!sr.pdf || sr.pdf.length === 0) return fail(Err.EXPORT_FAILED, 'render arm produced no pdf bytes')
+          bytes = sr.pdf
+          pages = sr.pages
+          break
+        }
+        default:
+          return fail(Err.INVALID_PARAMS, 'unknown format')
+      }
+
+      if (i === 0) {
+        firstText = text
+        firstBytes = args.format === 'pdf' ? bytes : undefined
+      }
+
+      if (args.outDir) {
+        const filename = targetIds.length === 1 && sid === 's1' ? `${slug}.${args.format}` : `${slug}-${sid}.${args.format}`
+        const relPath = `galley-exports/${filename}`
+        writeFileSync(join(args.outDir, relPath), bytes)
+        files.push({
+          sheetId: sid,
+          path: relPath,
+          format: args.format,
+          pages,
+          sizeBytes: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+        })
+      }
+    }
+
+    return {
+      ok: true,
+      format: args.format,
+      ...(firstText !== undefined ? { text: firstText } : {}),
+      ...(firstBytes !== undefined ? { bytes: firstBytes } : {}),
+      ...(args.outDir ? { files } : {}),
     }
   } catch (e) {
     return mapError(e)
