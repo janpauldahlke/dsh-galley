@@ -97,7 +97,9 @@ export interface RenderOptions {
 export function renderTypstSource(blocks: GalleyBlock[], opts: RenderOptions = {}): string {
   const lines: string[] = []
   lines.push(`#set page(paper: ${typstStringLiteral(opts.paper ?? 'a4')}, margin: (top: 2cm, bottom: 2cm, left: 2.5cm, right: 2.5cm))`)
-  lines.push(`#set text(size: ${opts.sizePt ?? 11}pt, lang: "en")`)
+  lines.push(`#set text(size: ${opts.sizePt ?? 11}pt, font: ("Liberation Sans", "Liberation Serif", "Libertinus Serif"), lang: "en")`)
+  lines.push(`#show raw: set text(font: ("Liberation Mono", "DejaVu Sans Mono"))`)
+  lines.push(`#show math.equation: set text(font: ("New Computer Modern Math", "Noto Sans Math"))`)
   lines.push('')
   for (const b of blocks) {
     lines.push(blockToTypst(b))
@@ -497,7 +499,9 @@ function preamble(sheet: GalleySheet, locale?: GalleyLocale): string[] {
   )
   const flippedArg = isLandscape ? ', flipped: true' : ''
   L.push(`#set page(paper: ${typString(g.paper)}${flippedArg}, margin: (top: ${m.top}cm, bottom: ${m.bottom}cm, left: ${m.left}cm, right: ${m.right}cm))`)
-  L.push(`#set text(size: 10pt, lang: ${typString(typstLang)})`)
+  L.push(`#set text(size: 10pt, font: ("Liberation Sans", "Liberation Serif", "Libertinus Serif"), lang: ${typString(typstLang)})`)
+  L.push(`#show raw: set text(font: ("Liberation Mono", "DejaVu Sans Mono"))`)
+  L.push(`#show math.equation: set text(font: ("New Computer Modern Math", "Noto Sans Math"))`)
   L.push(`#set par(justify: true, leading: 0.75em)`)
   L.push(`#set heading(numbering: none)`)
   // Suppress `#title` when a `header` block carries the title OR block 0 is already

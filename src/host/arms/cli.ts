@@ -9,6 +9,7 @@ import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync, mkdirSync
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { BaseArm } from './base.ts'
+import { resolveBundledFontsDir } from './fonts.ts'
 import { ArmError } from './types.ts'
 import type { CompiledTyp, ShadowFile } from './types.ts'
 import { parseCliDiagnostics } from '../../typst/index.ts'
@@ -45,9 +46,11 @@ export class CliArm extends BaseArm {
     writeFileSync(src, typ, 'utf8')
 
     const diags: { message: string; line?: number }[] = []
+    const fontsDir = resolveBundledFontsDir()
+    const fontFlags = fontsDir ? ['--font-path', fontsDir] : []
     try {
-      execFileSync(this.bin, ['compile', src, pdfOut], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] })
-      execFileSync(this.bin, ['compile', src, svgOut], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] })
+      execFileSync(this.bin, ['compile', ...fontFlags, src, pdfOut], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] })
+      execFileSync(this.bin, ['compile', ...fontFlags, src, svgOut], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] })
     } catch (e) {
       const anyErr = e as { stderr?: string | Buffer; message?: string }
       const errText = (typeof anyErr.stderr === 'string' ? anyErr.stderr : Buffer.from(anyErr.stderr ?? '').toString('utf8')) ||

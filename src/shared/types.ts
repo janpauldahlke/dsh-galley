@@ -9,7 +9,7 @@ import type { GalleyLocale } from './i18n.ts'
 export type { GalleyLocale }
 
 export const PLUGIN = 'dsh-galley'
-export const VERSION = '0.1.0'
+export const VERSION = '0.2.0'
 export const HEALTH_ROUTE = '/api/galley/health'
 export const STATE_ROUTE = '/api/galley/state'
 export const EDIT_ROUTE = '/api/galley/edit'

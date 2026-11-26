@@ -192,7 +192,7 @@ test('galley_annotate: add / list / resolve / unresolve', async () => {
   assert.equal(unres.annotations[0].resolved, false)
 })
 
-test('galley_export: typ / md / tex are pure text; pdf via bytes; docx fails (M4)', async () => {
+test('galley_export: typ / md / tex are pure text; pdf and docx emit binary buffers', async () => {
   const r = await openPacket([
     { type: 'heading', level: 1, body: 'Title' },
     { type: 'prose', body: 'Body text' },
@@ -213,12 +213,12 @@ test('galley_export: typ / md / tex are pure text; pdf via bytes; docx fails (M4
   assert.equal(pdf.ok, true)
   assert.ok(pdf.bytes instanceof Buffer && pdf.bytes.length > 0)
 
-  // M1.5 H6: docx is a clean failure until M4 — never faked with Markdown bytes.
+  // M4: deterministic in-process OOXML .docx archive (PKZIP magic bytes).
   const docx = await galleyExport(deps, { packetId: r.packetId, format: 'docx' })
-  assert.equal(docx.ok, false)
-  assert.equal(docx.code, Err.EXPORT_FAILED)
-  assert.equal(docx.bytes, undefined)
-  assert.match(docx.message, /M4/)
+  assert.equal(docx.ok, true)
+  assert.ok(docx.bytes instanceof Buffer && docx.bytes.length > 500)
+  assert.equal(docx.bytes.subarray(0, 2).toString('utf8'), 'PK')
+  assert.equal(docx.text, undefined)
 })
 
 // ── Active-packet resolution (M1.5 H4) ──────────────────────────────────────

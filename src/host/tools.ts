@@ -60,8 +60,18 @@ import {
   clearSessionActivePacket,
   _resetGalleyWorkspaceForTests,
 } from './workspace.ts'
+import {
+  exportSheetDocx,
+  unpackDocxEntries,
+  probeImageDimensions,
+  splitInlinesTwoColumn,
+} from './docx.ts'
 
 export {
+  exportSheetDocx,
+  unpackDocxEntries,
+  probeImageDimensions,
+  splitInlinesTwoColumn,
   splitSvgPages,
   serializeInlines,
   parseInlines,
@@ -1461,9 +1471,6 @@ export async function galleyExport(
   if (!['typ', 'md', 'tex', 'pdf', 'docx'].includes(args.format)) {
     return fail(Err.INVALID_PARAMS, `unknown export format '${args.format}'`)
   }
-  if (args.format === 'docx') {
-    return fail(Err.EXPORT_FAILED, 'docx exporter lands in M4; use pdf or typ')
-  }
 
   const targetIds: SheetId[] =
     args.sheetIds && args.sheetIds.length > 0
@@ -1483,6 +1490,8 @@ export async function galleyExport(
     let firstBytes: Buffer | undefined
     const files: ExportFileReceipt[] = []
     const slug = exportSlug(packet.title)
+    const packetAssetBytes =
+      args.format === 'pdf' || args.format === 'docx' ? assetBytesForPacket(deps, packet) : {}
     if (args.outDir) {
       mkdirSync(join(args.outDir, 'galley-exports'), { recursive: true })
     }
@@ -1507,9 +1516,12 @@ export async function galleyExport(
           text = toTex(sheet)
           bytes = Buffer.from(text, 'utf8')
           break
+        case 'docx':
+          bytes = exportSheetDocx(sheet, packet, packetAssetBytes)
+          break
         case 'pdf': {
           if (!deps.render) return fail(Err.TYPST_COMPILE_ERROR, 'no render arm available for pdf')
-          const sr = await deps.render(sheet, packet, assetBytesForPacket(deps, packet))
+          const sr = await deps.render(sheet, packet, packetAssetBytes)
           if (!sr.pdf || sr.pdf.length === 0) return fail(Err.EXPORT_FAILED, 'render arm produced no pdf bytes')
           bytes = sr.pdf
           pages = sr.pages
@@ -1521,7 +1533,7 @@ export async function galleyExport(
 
       if (i === 0) {
         firstText = text
-        firstBytes = args.format === 'pdf' ? bytes : undefined
+        firstBytes = args.format === 'pdf' || args.format === 'docx' ? bytes : undefined
       }
 
       if (args.outDir) {

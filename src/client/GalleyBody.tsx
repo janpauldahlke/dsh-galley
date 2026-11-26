@@ -941,7 +941,7 @@ export function GalleyBody(props: {
           }}
         >
           <span>Export format:</span>
-          {(['pdf', 'typ', 'md', 'tex'] as const).map((fmt) => (
+          {(['pdf', 'docx', 'typ', 'md', 'tex'] as const).map((fmt) => (
             <button key={fmt} type="button" style={headerBtn} onClick={() => { void handleExport(fmt) }}>
               .{fmt.toUpperCase()}
             </button>

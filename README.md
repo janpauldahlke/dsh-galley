@@ -1,6 +1,6 @@
 # dsh-galley
 
-> **Status:** `0.1.0` — M3.2 Domain-Neutral English Workbench, KV-Cache-Safe Agent Delta Inject, `ctx.galley` Service & Native Typst Proofing
+> **Status:** `0.2.0` — Deterministic `.pdf` / `.docx` / `.typ` / `.tex` / `.md` Exporters, Offline SIL-OFL-1.1 Fonts + WASM Fallback Parity, KV-Cache-Safe Agent Delta Inject & `ctx.galley` Service
 
 Shared volatile **document workbench & typesetter** for human + agent co-authoring
 in the **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) web and desktop UI.
@@ -80,7 +80,15 @@ instant local **Typst** page typesetting and deterministic exporters.
 | `galley_read_block` | Read verbatim content of specific block ID(s) with neighbor context and dependency edges |
 | `galley_edit_block` | Single writer for blocks (`insert` / `patch` / `move` / `remove`) and sheets (`sheet-add` / `sheet-update` / `sheet-remove`); human-origin block edits stage inline diff proposals |
 | `galley_annotate` | Add, list, resolve, or unresolve non-printing margin notes anchored to a block |
-| `galley_export` | Compile sheet/packet to `.pdf`, `.typ`, `.tex`, or `.md` (`.docx` landing in M4) |
+| `galley_export` | Compile sheet/packet to `.pdf`, `.docx`, `.typ`, `.tex`, or `.md` into `<cwd>/galley-exports/` (ready for `present` & 1-click browser download) |
+
+---
+
+## Offline Typography & Desktop / Electron Packaging
+
+- **Zero runtime or `postinstall` network fetches:** `dsh-galley` ships a self-contained SIL Open Font License 1.1 typeface set (`Liberation Sans`, `Liberation Serif`, `Liberation Mono`, `Noto Sans Math`, plus [`fonts/OFL.txt`](./fonts/OFL.txt)) inside `fonts/`.
+- **Native primary + offline WASM fallback:** Uses `@myriaddreamin/typst-ts-node-compiler` (`~0.02 ms` warm recompile) and automatically degrades to `@myriaddreamin/typst.ts` WASM (`GALLEY_TYPST_ARM=wasm`) when a prebuilt `.node` binary is unavailable. Font files are loaded as in-memory `Buffer` / `Uint8Array` blobs via `node:fs` so both standard `npm` tarball installs and Electron `app.asar` desktop builds work offline out of the box.
+- **Zero-dependency `.docx` OOXML engine:** Generates ECMA-376 Word documents in-process using `node:zlib` only — real `Heading1`–`Heading3` outline levels, borderless 2-column header/media tables (zero floating-anchor drift), repeating bordered data headers, `m:oMath` equations, `AIAssistance` custom properties, and byte-identical SHA-256 output for a fixed packet revision.
 
 ---
 

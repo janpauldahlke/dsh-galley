@@ -6,6 +6,7 @@
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { BaseArm } from './base.ts'
+import { loadBundledFontBlobs } from './fonts.ts'
 import { ArmError } from './types.ts'
 import type { CompiledTyp, ShadowFile } from './types.ts'
 
@@ -20,7 +21,11 @@ type NodeCompiler = {
   /** Forget all mapped shadow files. */
   resetShadow(): void
 }
-type NodeCompilerModule = { NodeCompiler: { create(args?: { workspace?: string }): NodeCompiler } }
+type NodeCompilerModule = {
+  NodeCompiler: {
+    create(args?: { workspace?: string; fontArgs?: Array<{ fontBlobs: Buffer[] }> }): NodeCompiler
+  }
+}
 
 export class NativeArm extends BaseArm {
   readonly name = 'native' as const
@@ -31,7 +36,11 @@ export class NativeArm extends BaseArm {
   async init(): Promise<void> {
     if (this.compiler) return
     const mod = (await import('@myriaddreamin/typst-ts-node-compiler')) as unknown as NodeCompilerModule
-    this.compiler = mod.NodeCompiler.create({ workspace: this.workspace })
+    const fontBlobs = loadBundledFontBlobs()
+    this.compiler = mod.NodeCompiler.create({
+      workspace: this.workspace,
+      ...(fontBlobs.length > 0 ? { fontArgs: [{ fontBlobs }] } : {}),
+    })
   }
 
   protected compileTyp(typ: string, shadows?: ShadowFile[]): CompiledTyp {

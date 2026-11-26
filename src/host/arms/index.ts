@@ -1,7 +1,7 @@
 /**
  * Arm factory (spec 03 §2 + runtime decision). Primary = native; on native
- * load failure, fall back to WASM. The CLI arm is created on demand for error
- * attribution + export of record.
+ * load failure, fall back to WASM. Env `GALLEY_TYPST_ARM=native|wasm|cli`
+ * overrides primary selection.
  */
 import type { Arm, ArmName } from './types.ts'
 import { ArmError } from './types.ts'
@@ -14,6 +14,7 @@ export { BaseArm } from './base.ts'
 export { NativeArm } from './native.ts'
 export { WasmArm, inferPagesFromSvg } from './wasm.ts'
 export { CliArm } from './cli.ts'
+export { BUNDLED_FONT_FILES, loadBundledFontBlobs, resolveBundledFontsDir } from './fonts.ts'
 
 export async function createArm(name: ArmName = 'native'): Promise<Arm> {
   const a = name === 'native' ? new NativeArm() : name === 'wasm' ? new WasmArm() : new CliArm()
@@ -21,8 +22,13 @@ export async function createArm(name: ArmName = 'native'): Promise<Arm> {
   return a
 }
 
-/** Primary render arm with the native → WASM fallback (spec 03 §2). */
-export async function createPrimaryArm(): Promise<{ arm: Arm; available: ArmName[] }> {
+/** Primary render arm with env override + native → WASM fallback (spec 03 §1/§2). */
+export async function createPrimaryArm(): Promise<{ arm: Arm; available: ArmName[]; note?: string }> {
+  const override = process.env.GALLEY_TYPST_ARM?.trim().toLowerCase()
+  if (override === 'wasm' || override === 'cli' || override === 'native') {
+    const arm = await createArm(override)
+    return { arm, available: [override] }
+  }
   try {
     const arm = new NativeArm()
     await arm.init()
@@ -30,10 +36,10 @@ export async function createPrimaryArm(): Promise<{ arm: Arm; available: ArmName
   } catch (e) {
     const arm = new WasmArm()
     await arm.init()
-    return { arm, available: ['wasm'], note: `native unavailable: ${e instanceof Error ? e.message : String(e)}` } as {
-      arm: Arm
-      available: ArmName[]
-      note?: string
+    return {
+      arm,
+      available: ['wasm'],
+      note: `native unavailable: ${e instanceof Error ? e.message : String(e)}`,
     }
   }
 }

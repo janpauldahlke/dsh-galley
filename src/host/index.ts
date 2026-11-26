@@ -27,7 +27,7 @@ import {
 } from '../shared/types.ts'
 import type { GalleyPacket, GalleySheet } from '../shared/types.ts'
 import { renderTypstSource, type GalleyBlock } from '../typst/index.ts'
-import { createPrimaryArm, type Arm } from './arms/index.ts'
+import { createPrimaryArm, loadBundledFontBlobs, type Arm } from './arms/index.ts'
 import {
   createGalleyUserMessage,
   estimateTokens,
@@ -86,7 +86,16 @@ export type {
 // Arms are re-exported so the in-process gate test (test/05) and the health
 // probe can drive the real render pipeline; `@myriaddreamin/*` stays external
 // (the native .node binary is loaded lazily by NativeArm.init).
-export { createArm, createPrimaryArm, NativeArm, WasmArm, CliArm } from './arms/index.ts'
+export {
+  createArm,
+  createPrimaryArm,
+  NativeArm,
+  WasmArm,
+  CliArm,
+  BUNDLED_FONT_FILES,
+  loadBundledFontBlobs,
+  resolveBundledFontsDir,
+} from './arms/index.ts'
 export type { Arm, ArmName } from './arms/index.ts'
 
 /** The sample packet the health probe renders (proves the native arm in-process). */
@@ -123,8 +132,11 @@ export function renderTypstNative(source: string): Promise<RenderReceipt> {
     nativeCompilerPromise = import('@myriaddreamin/typst-ts-node-compiler')
   }
   return nativeCompilerPromise.then((mod) => {
-    const { NodeCompiler } = mod as { NodeCompiler: { create(): TypstCompiler } }
-    const c = NodeCompiler.create()
+    const { NodeCompiler } = mod as {
+      NodeCompiler: { create(args?: { fontArgs?: Array<{ fontBlobs: Buffer[] }> }): TypstCompiler }
+    }
+    const fontBlobs = loadBundledFontBlobs()
+    const c = NodeCompiler.create(fontBlobs.length > 0 ? { fontArgs: [{ fontBlobs }] } : undefined)
     const r = c.compile({ mainFileContent: source })
     if (r.hasError()) {
       const d = r.takeDiagnostics()
@@ -491,8 +503,8 @@ export function registerGalleyTools(ctx: Context): () => void {
   register({
     name: 'galley_export',
     description:
-      'Export sheets to typ / md / tex (pure) or pdf (via the render arm), writing deliverables into <cwd>/galley-exports/. ' +
-      'Omit packetId to use the active packet. docx lands in M4 (currently GALLEY_EXPORT_FAILED).',
+      'Export sheets to pdf (via Typst arm), docx (deterministic OOXML Word document), or typ / md / tex (pure text), ' +
+      'writing deliverables into <cwd>/galley-exports/ ready for `present`. Omit packetId to use the active packet.',
     parameters: {
       type: 'object',
       additionalProperties: false,
