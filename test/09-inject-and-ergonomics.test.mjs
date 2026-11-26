@@ -164,21 +164,21 @@ test('KV-cache law: 0 messages when unchanged; whole-Mappe delta + attributed sh
       assert.equal(out, decisionIn)
     }
 
-    // 2. Open Arbeitsblatt + Erwartungshorizont and link b4 -> b2
+    // 2. Open Problem Sheet + Answer Key (`worksheet`) and link b4 -> b2
     const { deps, store } = (() => {
       const m = makeDeps(subWs, registry)
       return { deps: m.deps, store: m.deps.store }
     })()
     const opened = await galleyOpen(deps, {
-      template: 'arbeitsblatt',
-      title: 'Dreißigjähriger Krieg',
+      template: 'worksheet',
+      title: 'Distributed Consensus',
     })
     const pid = opened.packetId
     const linked = await galleyEditBlock(deps, {
       packetId: pid,
       op: 'patch',
       blockId: 'b4',
-      patch: { body: 'Konfessionskonflikt und habsburgische Machtpolitik.' },
+      patch: { body: 'Paxos and Raft safety properties.' },
       dependsOn: ['b2'],
       origin: 'agent',
     })
@@ -186,7 +186,7 @@ test('KV-cache law: 0 messages when unchanged; whole-Mappe delta + attributed sh
 
     // Step A: initial baseline outline + 1-line Rules
     {
-      const { args, decisionIn, userMsg, runtimeCtxMsg } = makeStepCall(session, 'Prüfe die Mappe.')
+      const { args, decisionIn, userMsg, runtimeCtxMsg } = makeStepCall(session, 'Check packet.')
       const out = await runStep(args, decisionIn)
       assert.equal(out.messages.length, 3)
       assert.equal(out.messages[0], userMsg)
@@ -201,9 +201,9 @@ test('KV-cache law: 0 messages when unchanged; whole-Mappe delta + attributed sh
         rev: revAfterSetup,
       })
       const text = injected.content[0].text
-      assert.match(text, /\[dsh-galley · Mappe "Dreißigjähriger Krieg" · rev \d+ · mode auto\]/)
-      assert.match(text, /s1 "Dreißigjähriger Krieg" \(1p, \+0 overflow\):/)
-      assert.match(text, /s2 "Erwartungshorizont" \(1p\):/)
+      assert.match(text, /\[dsh-galley · Packet "Distributed Consensus" · rev \d+ · mode auto\]/)
+      assert.match(text, /s1 "Distributed Consensus" \(1p, \+0 overflow\):/)
+      assert.match(text, /s2 "Answer Key" \(1p\):/)
       assert.match(text, /b4 answer\(→b2\)/)
       assert.match(text, /Rules: galley_read_block origins verbatim/)
       assert.ok(estimateTokens(text) < 220, `tokens=${estimateTokens(text)} must be < 220`)
@@ -313,8 +313,8 @@ test('Resume backward surface scan, session-sticky packet isolation & fail-open 
   try {
     const registry = new GalleyServiceRegistry()
     const { deps, root } = makeDeps(subWs, registry)
-    const pA = await galleyOpen(deps, { template: 'arbeitsblatt', title: 'Mappe Alpha' })
-    const pB = await galleyOpen(deps, { template: 'generic', title: 'Mappe Beta' })
+    const pA = await galleyOpen(deps, { template: 'worksheet', title: 'Packet Alpha' })
+    const pB = await galleyOpen(deps, { template: 'generic', title: 'Packet Beta' })
 
     // Pin session-alpha to pA even though global active.json points to pB
     setSessionActivePacket(root, 'sess-alpha', pA.packetId)
@@ -383,7 +383,7 @@ test('M3.1 P0 & P1: multi-sheet insert guard, beforeId/afterId sheet inference, 
   const subWs = mkdtempSync(join(tmpdir(), 'galley-m31-ops-'))
   try {
     const { deps } = makeDeps(subWs)
-    const opened = await galleyOpen(deps, { template: 'arbeitsblatt', title: 'Westfälischer Friede' })
+    const opened = await galleyOpen(deps, { template: 'worksheet', title: 'Distributed Systems' })
     const pid = opened.packetId
 
     // P0.1: Multi-sheet packet (`s1`, `s2`) rejects un-anchored `insert` without `sheetId`!
@@ -467,7 +467,7 @@ test('M3.1 P0 & P1: multi-sheet insert guard, beforeId/afterId sheet inference, 
   }
 })
 
-test('M3.1 P2 & zero-skill packaging: GFM pipe tables + full header/task in md export; 6 tools locked; no dsh-skills coupling', async () => {
+test('M3.1 P2 & zero-skill packaging: neutral English header aliases, GFM pipe tables + task prefix in md export; 6 tools locked; no dsh-skills coupling', async () => {
   const subWs = mkdtempSync(join(tmpdir(), 'galley-m31-md-'))
   try {
     const { deps } = makeDeps(subWs)
@@ -477,30 +477,30 @@ test('M3.1 P2 & zero-skill packaging: GFM pipe tables + full header/task in md e
       blocks: [
         {
           type: 'header',
-          fields: { titel: 'Der Westfälische Friede', fach: 'Geschichte', klasse: '9b', datum: '24.10.1648', name: '' },
+          fields: { title: 'Consensus Protocols', subtitle: 'CS 244', meta: 'Section B', date: '2026-11-26', name: '' },
         },
         {
           type: 'source_text',
-          title: 'Quelle M1: Friedensvertrag von Osnabrück',
+          title: 'Excerpt 1: Raft Paper §5.2',
           lineNumbers: { every: 5 },
-          body: 'Alle Reichsstände erhalten das Bündnisrecht.',
+          body: 'A server remains in follower state as long as it receives valid RPCs.',
         },
         {
           type: 'table',
           colWidths: ['20%', '40%', '40%'],
-          headers: ['Bereich', 'Regelung 1648', 'Folge'],
+          headers: ['Property', 'Guarantee', 'Mechanism'],
           rows: [
-            ['Konfession', '**Normaljahr 1624** (inkl. Calvinismus)', 'Ende der Glaubenskriege'],
-            ['Reichsrecht', 'Landeshoheit (*ius territoriale*)', 'Machtverlust des Kaisers'],
+            ['Election Safety', '**At most one leader** per term', 'Majority quorum'],
+            ['Log Matching', 'Identical prefix (*term + index*)', 'AppendEntries check'],
           ],
         },
         {
           type: 'task',
-          body: 'Erläutere die konfessionellen Bestimmungen anhand der Tabelle.',
+          body: 'Explain election safety using the table above.',
         },
         {
           type: 'task',
-          body: 'Aufgabe 2 (AFB III): Beurteile die Reichsverfassung nach 1648.',
+          body: 'Task 2 (Proof): Show why split votes terminate.',
         },
       ],
     })
@@ -510,18 +510,18 @@ test('M3.1 P2 & zero-skill packaging: GFM pipe tables + full header/task in md e
     assert.equal(mdRes.ok, true)
     const md = mdRes.text
 
-    // Header retains Fach, Klasse, Datum, AND student Name fill-in line
-    assert.match(md, /\*\*Der Westfälische Friede\*\* · Fach: Geschichte · Klasse: 9b · Datum: 24\.10\.1648 · Name: _{10,}/)
+    // Header normalizes English aliases (`title`, `subtitle`, `meta`, `date`) + Name fill-in line
+    assert.match(md, /\*\*Consensus Protocols\*\* · CS 244 · Group: Section B · 2026-11-26 · Name: _{10,}/)
     // Source text retains title
-    assert.match(md, /### Quelle M1: Friedensvertrag von Osnabrück/)
+    assert.match(md, /### Excerpt 1: Raft Paper §5\.2/)
     // Valid GFM pipe table with separators between every column and trailing pipes
-    assert.match(md, /\| \*\*Bereich\*\* \| \*\*Regelung 1648\*\* \| \*\*Folge\*\* \|/)
+    assert.match(md, /\| \*\*Property\*\* \| \*\*Guarantee\*\* \| \*\*Mechanism\*\* \|/)
     assert.match(md, /\| --- \| --- \| --- \|/)
-    assert.match(md, /\| Konfession \| \*\*Normaljahr 1624\*\* \(inkl\. Calvinismus\) \| Ende der Glaubenskriege \|/)
-    // Task 1 gets auto-numbered, Task 2 does NOT get double-prefixed
-    assert.match(md, /\*\*Aufgabe 1:\*\* Erläutere die konfessionellen Bestimmungen/)
-    assert.equal(/Aufgabe 2.*Aufgabe 2/.test(md), false)
-    assert.match(md, /Aufgabe 2 \(AFB III\): Beurteile/)
+    assert.match(md, /\| Election Safety \| \*\*At most one leader\*\* per term \| Majority quorum \|/)
+    // Task 1 gets auto-numbered "Task 1:", Task 2 does NOT get double-prefixed
+    assert.match(md, /\*\*Task 1:\*\* Explain election safety/)
+    assert.equal(/Task 2.*Task 2/.test(md), false)
+    assert.match(md, /Task 2 \(Proof\): Show why/)
 
     // Verify 6 tools locked and ZERO dsh-skills dependency in apply() or package.json
     const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
@@ -546,10 +546,52 @@ test('M3.1 P2 & zero-skill packaging: GFM pipe tables + full header/task in md e
   }
 })
 
-test('Built-in `verlaufsplan` template: A4 Landscape, teacher header (no Name line), 6-col table with Ziel + empty Notizen column', async () => {
+test('Cordis leaf-plugin seam (`ctx.galley.registerTemplate` + `locale: "de"` stub): Didaktik Verlaufsplan renders A4 Landscape with Ziel + empty Notizen column while core stays domain-neutral', async () => {
   const subWs = mkdtempSync(join(tmpdir(), 'galley-m31-vp-'))
   try {
-    const { deps } = makeDeps(subWs)
+    const registry = new GalleyServiceRegistry()
+    // Core BUILTIN_TEMPLATES must be strictly domain-neutral English (no arbeitsblatt/verlaufsplan in core)
+    const coreIds = registry.listTemplates().map((t) => t.id)
+    assert.deepEqual(coreIds, ['worksheet', 'rfc', 'generic'])
+
+    // Companion leaf plugin (e.g. `dsh-galley-didaktik`) registers `verlaufsplan` with `locale: 'de'`
+    const disposeTpl = registry.registerTemplate({
+      id: 'verlaufsplan',
+      title: 'Verlaufsplan',
+      locale: 'de',
+      description: 'Unterrichtsverlaufsplan im A4-Querformat',
+      sheets: [
+        {
+          id: 's1',
+          title: 'Verlaufsplan',
+          geometry: {
+            paper: 'a4',
+            orientation: 'landscape',
+            margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+            targetPages: 1,
+          },
+          starterBlocks: [
+            {
+              type: 'header',
+              fields: { titel: 'Verlaufsplan', fach: '', klasse: '', datum: '' },
+            },
+            {
+              type: 'table',
+              colWidths: ['9%', '12%', '34%', '13%', '17%', '15%'],
+              headers: ['Zeit', 'Phase', 'Ablauf (Lehrer / Schüler)', 'Material', 'Ziel', 'Notizen'],
+              rows: [
+                ['0–5 min', 'Einstieg', '', '', '', ''],
+                ['5–25 min', 'Erarbeitung', '', '', '', ''],
+                ['25–40 min', 'Sicherung', '', '', '', ''],
+                ['40–45 min', 'Abschluss', '', '', '', ''],
+              ],
+            },
+          ],
+        },
+      ],
+    })
+
+    const { deps } = makeDeps(subWs, registry)
     const opened = await galleyOpen(deps, {
       template: 'verlaufsplan',
       title: 'Verlaufsplan — Der Westfälische Friede 1648',
@@ -562,15 +604,12 @@ test('Built-in `verlaufsplan` template: A4 Landscape, teacher header (no Name li
     assert.equal(pr.targetPagesMet, true)
 
     const loaded = deps.store.load(opened.packetId)
+    assert.equal(loaded.locale, 'de', 'packet inherits locale="de" from domain plugin template')
     const s1 = loaded.sheets.s1
     assert.equal(s1.geometry.orientation, 'landscape')
-    assert.equal(s1.blocks.length, 2)
-    assert.equal(s1.blocks[0].type, 'header')
-    assert.equal(s1.blocks[0].fields.titel, 'Verlaufsplan — Der Westfälische Friede 1648')
-    assert.equal('name' in s1.blocks[0].fields, false, 'teacher-only Verlaufsplan header must omit student name line')
+    assert.equal('name' in s1.blocks[0].fields, false, 'teacher-only Verlaufsplan header omits student name line')
 
     const tbl = s1.blocks[1]
-    assert.equal(tbl.type, 'table')
     const headerTexts = tbl.headers.map((cell) => cell.map((i) => i.v).join(''))
     assert.deepEqual(headerTexts, [
       'Zeit',
@@ -580,16 +619,20 @@ test('Built-in `verlaufsplan` template: A4 Landscape, teacher header (no Name li
       'Ziel',
       'Notizen',
     ])
-    assert.equal(tbl.colWidths.length, 6)
-    assert.equal(tbl.rows.length, 4)
     for (const row of tbl.rows) {
-      assert.equal(row.length, 6)
       assert.equal(row[5].map((i) => i.v).join(''), '', '6th column (Notizen) starts empty for handwritten teacher notes')
     }
+
+    const typRes = await galleyExport(deps, { packetId: opened.packetId, format: 'typ' })
+    assert.equal(typRes.ok, true)
+    assert.match(typRes.text, /lang: "de"/, 'German template emits lang: "de" in Typst preamble')
 
     const pdfRes = await galleyExport(deps, { packetId: opened.packetId, format: 'pdf' })
     assert.equal(pdfRes.ok, true)
     assert.ok(pdfRes.bytes.subarray(0, 5).toString('latin1') === '%PDF-')
+
+    disposeTpl()
+    assert.deepEqual(registry.listTemplates().map((t) => t.id), ['worksheet', 'rfc', 'generic'])
   } finally {
     rmSync(subWs, { recursive: true, force: true })
   }

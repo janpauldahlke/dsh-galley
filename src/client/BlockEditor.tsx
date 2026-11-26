@@ -283,21 +283,21 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
             flexWrap: 'wrap',
           }}
         >
-          <span>Block wurde zwischenzeitlich geändert.</span>
+          <span>Block was modified on the server meanwhile.</span>
           <span style={{ display: 'inline-flex', gap: 4 }}>
             <button
               type="button"
               onClick={() => { void commitNow(true) }}
               style={{ ...smallBtn, borderColor: '#dc2626', color: '#dc2626', fontWeight: 600 }}
             >
-              Meine behalten
+              Keep mine
             </button>
             <button
               type="button"
               onClick={() => setDraft(blockToDraftBuffer(block))}
               style={smallBtn}
             >
-              Server übernehmen
+              Take server
             </button>
           </span>
         </div>
@@ -307,9 +307,9 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
       {block.type === 'header' && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
           <div style={{ gridColumn: '1 / -1' }}>
-            <label style={{ fontSize: 11, opacity: 0.75 }}>Titel</label>
+            <label style={{ fontSize: 11, opacity: 0.75 }}>Title</label>
             <input
-              aria-label="Header Titel"
+              aria-label="Header title"
               style={inputStyle}
               value={draft.headerFields.titel}
               onChange={(e) =>
@@ -317,9 +317,15 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               }
             />
           </div>
-          {(['fach', 'klasse', 'datum'] as const).map((fieldKey) => (
+          {(
+            [
+              { key: 'fach', label: 'Subtitle / Subject' },
+              { key: 'klasse', label: 'Group / Meta' },
+              { key: 'datum', label: 'Date' },
+            ] as const
+          ).map(({ key: fieldKey, label }) => (
             <div key={fieldKey}>
-              <label style={{ fontSize: 11, opacity: 0.75, textTransform: 'capitalize' }}>{fieldKey}</label>
+              <label style={{ fontSize: 11, opacity: 0.75 }}>{label}</label>
               <input
                 aria-label={`Header ${fieldKey}`}
                 style={inputStyle}
@@ -340,12 +346,12 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                 checked={draft.headerShowNameLine}
                 onChange={(e) => updateDraft((p) => ({ ...p, headerShowNameLine: e.target.checked }))}
               />
-              Namenszeile (Schülerblatt)
+              Name line
             </label>
             {draft.headerShowNameLine && (
               <input
                 aria-label="Header name"
-                placeholder="Leer = Ausfülllinie (Name: ____)"
+                placeholder="Blank = fill-in line (Name: ____)"
                 style={inputStyle}
                 value={draft.headerFields.name}
                 onChange={(e) =>
@@ -363,7 +369,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
       {/* 2. HEADING controls */}
       {block.type === 'heading' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11 }}>
-          <span>Ebene:</span>
+          <span>Level:</span>
           {([1, 2, 3] as const).map((lvl) => (
             <button
               key={lvl}
@@ -384,7 +390,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               checked={draft.headingNumbered}
               onChange={(e) => updateDraft((p) => ({ ...p, headingNumbered: e.target.checked }))}
             />
-            Nummeriert
+            Numbered
           </label>
         </div>
       )}
@@ -393,16 +399,16 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
       {block.type === 'source_text' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <input
-            aria-label="Quellentext Titel"
-            placeholder="Quellentitel (optional)"
+            aria-label="Source text title"
+            placeholder="Source title / citation (optional)"
             style={{ ...inputStyle, flex: '1 1 140px' }}
             value={draft.sourceTitle}
             onChange={(e) => updateDraft((p) => ({ ...p, sourceTitle: e.target.value }))}
           />
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
-            <span>Zeilennr. alle</span>
+            <span>Line no. every</span>
             <input
-              aria-label="Zeilennummern Intervall"
+              aria-label="Line number interval"
               type="number"
               min={0}
               max={50}
@@ -417,7 +423,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
       {/* 4. CALLOUT tone selector */}
       {block.type === 'callout' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11 }}>
-          <span>Ton:</span>
+          <span>Tone:</span>
           {(['info', 'hint', 'warning'] as const).map((tone) => (
             <button
               key={tone}
@@ -439,10 +445,10 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
       {supportsRichText && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-            <button type="button" title="Fett (**…**)" style={smallBtn} onClick={() => wrapSelection('**', '**', 'fett')}>
+            <button type="button" title="Bold (**…**)" style={smallBtn} onClick={() => wrapSelection('**', '**', 'bold')}>
               <strong>B</strong>
             </button>
-            <button type="button" title="Kursiv (*…*)" style={smallBtn} onClick={() => wrapSelection('*', '*', 'kursiv')}>
+            <button type="button" title="Italic (*…*)" style={smallBtn} onClick={() => wrapSelection('*', '*', 'italic')}>
               <em>I</em>
             </button>
             <button type="button" title="Code (`…`)" style={smallBtn} onClick={() => wrapSelection('`', '`', 'code')}>
@@ -453,16 +459,16 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
             </button>
             <button
               type="button"
-              title="Lückentext ({{Hinweis}})"
+              title="Cloze blank ({{hint}})"
               style={smallBtn}
-              onClick={() => wrapSelection('{{', '}}', 'Lösung')}
+              onClick={() => wrapSelection('{{', '}}', 'hint')}
             >
-              ___ Lücke
+              ___ Cloze
             </button>
           </div>
           <textarea
             ref={textareaRef}
-            aria-label={`Block ${block.id} Inhalt`}
+            aria-label={`Block ${block.id} content`}
             rows={block.type === 'heading' ? 2 : block.type === 'source_text' ? 5 : 3}
             style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.45 }}
             value={draft.markup}
@@ -481,12 +487,12 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               onClick={() =>
                 updateDraft((p) => ({
                   ...p,
-                  tableHeaders: [...p.tableHeaders, `Spalte ${p.tableHeaders.length + 1}`],
+                  tableHeaders: [...p.tableHeaders, `Column ${p.tableHeaders.length + 1}`],
                   tableRows: p.tableRows.map((r) => [...r, '']),
                 }))
               }
             >
-              + Spalte
+              + Column
             </button>
             {draft.tableHeaders.length > 1 && (
               <button
@@ -500,7 +506,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                   }))
                 }
               >
-                − Spalte
+                − Column
               </button>
             )}
             <button
@@ -513,7 +519,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                 }))
               }
             >
-              + Zeile
+              + Row
             </button>
             {draft.tableRows.length > 1 && (
               <button
@@ -521,7 +527,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                 style={smallBtn}
                 onClick={() => updateDraft((p) => ({ ...p, tableRows: p.tableRows.slice(0, -1) }))}
               >
-                − Zeile
+                − Row
               </button>
             )}
           </div>
@@ -536,7 +542,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
             {draft.tableHeaders.map((h, ci) => (
               <input
                 key={`th-${ci}`}
-                aria-label={`Tabellenkopf ${ci + 1}`}
+                aria-label={`Table header ${ci + 1}`}
                 style={{ ...inputStyle, fontWeight: 600 }}
                 value={h}
                 onChange={(e) =>
@@ -552,7 +558,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               draft.tableHeaders.map((_, ci) => (
                 <input
                   key={`td-${ri}-${ci}`}
-                  aria-label={`Zelle ${ri + 1},${ci + 1}`}
+                  aria-label={`Cell ${ri + 1},${ci + 1}`}
                   style={inputStyle}
                   value={row[ci] ?? ''}
                   onChange={(e) =>
@@ -598,18 +604,18 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               }}
             >
               <option value="full" style={{ color: '#111' }}>full (100%)</option>
-              <option value="two-column" style={{ color: '#111' }}>two-column (2 Spalten)</option>
-              <option value="card-grid" style={{ color: '#111' }}>card-grid (Ausschneidekarten)</option>
-              <option value="media-right" style={{ color: '#111' }}>media-right (65/35 Bild rechts)</option>
-              <option value="media-left" style={{ color: '#111' }}>media-left (35/65 Bild links)</option>
+              <option value="two-column" style={{ color: '#111' }}>two-column (2 columns)</option>
+              <option value="card-grid" style={{ color: '#111' }}>card-grid (cut-out cards)</option>
+              <option value="media-right" style={{ color: '#111' }}>media-right (65/35 image right)</option>
+              <option value="media-left" style={{ color: '#111' }}>media-left (35/65 image left)</option>
             </select>
 
             {draft.slot.mode === 'card-grid' && (
               <>
                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  <span>Spalten:</span>
+                  <span>Columns:</span>
                   <select
-                    aria-label="Karten-Spalten"
+                    aria-label="Card columns"
                     value={String(draft.slot.columns ?? 3)}
                     onChange={(e) =>
                       updateDraft((p) => ({
@@ -632,9 +638,9 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                   </select>
                 </label>
                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  <span>Höhe (cm):</span>
+                  <span>Height (cm):</span>
                   <input
-                    aria-label="Kartenhöhe cm"
+                    aria-label="Card height cm"
                     type="number"
                     min={2}
                     max={20}
@@ -667,9 +673,9 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               style={smallBtn}
-              title="Bild hochladen, ablegen oder mit Strg+V einfügen"
+              title="Upload, drop, or Ctrl+V paste an image"
             >
-              🖼 Bild hochladen / Drop
+              🖼 Upload / Drop Image
             </button>
           </div>
 
@@ -679,7 +685,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                 <>
                   <span>Asset:</span>
                   <select
-                    aria-label="Medien-Asset"
+                    aria-label="Media asset"
                     value={draft.slot.asset?.id ?? ''}
                     onChange={(e) => {
                       const meta = assets[e.target.value]
@@ -711,7 +717,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
                 </>
               ) : (
                 <span style={{ color: '#d97706' }}>
-                  Bild ablegen, einfügen (Strg+V) oder „Bild hochladen“ klicken, um den Medien-Slot zu füllen.
+                  Drop, paste (Ctrl+V), or click "Upload / Drop Image" to populate this media slot.
                 </span>
               )}
             </div>
@@ -737,12 +743,12 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
           onClick={() => setShowDeps((v) => !v)}
           style={{ ...smallBtn, opacity: 0.85 }}
         >
-          Abhängig von ({draft.dependsOnIds.length}) {showDeps ? '▴' : '▾'}
+          Depends on ({draft.dependsOnIds.length}) {showDeps ? '▴' : '▾'}
         </button>
 
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           {draft.dirty && !mediaMissingAsset && (
-            <span style={{ fontSize: 10, opacity: 0.7 }}>Ungespeichert · Strg+Enter</span>
+            <span style={{ fontSize: 10, opacity: 0.7 }}>Unsaved · Ctrl+Enter</span>
           )}
           <button
             type="button"
@@ -756,7 +762,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               borderColor: draft.dirty && !mediaMissingAsset ? '#16a34a' : 'rgba(128,128,128,0.32)',
             }}
           >
-            Übernehmen
+            Apply
           </button>
         </div>
       </div>

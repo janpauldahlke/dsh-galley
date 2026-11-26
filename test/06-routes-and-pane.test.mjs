@@ -201,19 +201,19 @@ test('paneModel: responsive width threshold, poll delays, UTF-8 SVG decode & dir
   assert.equal(patch.body[1].t, 'strong')
 })
 
-test('HTTP routes: empty state -> open arbeitsblatt -> 200 state + 304 on unchanged rev', async () => {
+test('HTTP routes: empty state -> open worksheet -> 200 state + 304 on unchanged rev', async () => {
   const emptyRes = await fetch(`${baseUrl}/api/galley/state?cwd=${encodeURIComponent(wsA)}`)
   assert.equal(emptyRes.status, 200)
   const empty = await emptyRes.json()
   assert.equal(empty.activePacket, false)
   assert.equal(empty.rev, 0)
 
-  // Open Arbeitsblatt from the pane
+  // Open Worksheet from the pane
   const opened = await postJson('/api/galley/edit', {
     cwd: wsA,
     op: 'open',
-    template: 'arbeitsblatt',
-    title: 'Brüche: Addieren',
+    template: 'worksheet',
+    title: 'Fractions: Addition',
   })
   assert.equal(opened.status, 200)
   assert.equal(opened.json.ok, true)
@@ -289,7 +289,7 @@ test('HTTP routes: human patch applies directly (marks dependent stale) + overfl
   assert.ok(s1Proof.pages >= 2, `expected ≥2 pages on overflow, got ${s1Proof.pages}`)
   assert.equal(s1Proof.svgPages.length, s1Proof.pages)
   assert.ok(s1Proof.overflowLinesOnLastPage > 0, 'overflowLinesOnLastPage must be > 0 when pages > targetPages (1)')
-  assert.match(formatOverflowBanner(s1Proof.overflowLinesOnLastPage, 1), /^\+\d+ Zeilen über 1 Seite$/)
+  assert.match(formatOverflowBanner(s1Proof.overflowLinesOnLastPage, 1), /^\+\d+ lines over 1 page$/)
 
   // Verify each split SVG page is reset to translate(0, 0) and has non-colliding IDs across pages!
   const p1Svg = decodeSvgDataUri(s1Proof.svgPages[0])

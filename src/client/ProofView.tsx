@@ -12,6 +12,7 @@ import type {
   StateProofView,
   StateSheetView,
 } from '../shared/types.ts'
+import { getGalleyStrings } from '../shared/i18n.ts'
 import { decodeSvgDataUri, formatOverflowBanner } from './paneModel.ts'
 
 export interface ProofViewProps {
@@ -133,19 +134,19 @@ export function ProofView(props: ProofViewProps): ReactNode {
           <button
             type="button"
             data-testid="galley-add-sheet-btn"
-            title="Neuen Bogen hinzufügen"
+            title="Add new sheet"
             disabled={busy}
             onClick={() => onAddSheet()}
             style={pillBtn(false)}
           >
-            + Bogen
+            {getGalleyStrings('en').ui.addSheet}
           </button>
 
           {activeSheet && !renamingSheet && (
             <>
               <button
                 type="button"
-                title="Aktuellen Bogen umbenennen"
+                title="Rename current sheet"
                 onClick={() => {
                   setSheetTitleDraft(activeSheet.title)
                   setRenamingSheet(true)
@@ -158,7 +159,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
                 <button
                   type="button"
                   data-testid="galley-remove-sheet-btn"
-                  title="Aktuellen Bogen löschen"
+                  title="Delete current sheet"
                   disabled={busy}
                   onClick={() => onRemoveSheet(activeSheet.id)}
                   style={pillBtn(false)}
@@ -172,7 +173,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
           {activeSheet && renamingSheet && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
               <input
-                aria-label="Bogentitel"
+                aria-label="Sheet title"
                 value={sheetTitleDraft}
                 onChange={(e) => setSheetTitleDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -215,7 +216,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
               <button
                 type="button"
                 data-testid="galley-orientation-btn"
-                title="Seitenausrichtung umschalten (Hochformat / Querformat)"
+                title="Toggle page orientation (Portrait / Landscape)"
                 disabled={busy}
                 onClick={() =>
                   onUpdateOrientation(
@@ -225,16 +226,16 @@ export function ProofView(props: ProofViewProps): ReactNode {
                 }
                 style={pillBtn(orientation === 'landscape')}
               >
-                {orientation === 'landscape' ? '▭ Quer' : '▯ Hoch'}
+                {orientation === 'landscape' ? '▭ Landscape' : '▯ Portrait'}
               </button>
 
               <label
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, opacity: 0.85 }}
-                title="Zielseitenzahl (targetPages) für Überlauf-Prüfung"
+                title="Target page budget (targetPages) for overflow checks"
               >
-                <span>Ziel:</span>
+                <span>Target:</span>
                 <select
-                  aria-label="Zielseiten"
+                  aria-label="Target pages"
                   value={targetPages === undefined ? '' : String(targetPages)}
                   onChange={(e) => {
                     const v = e.target.value
@@ -249,11 +250,11 @@ export function ProofView(props: ProofViewProps): ReactNode {
                     padding: '1px 4px',
                   }}
                 >
-                  <option value="" style={{ color: '#111' }}>∞ frei</option>
-                  <option value="1" style={{ color: '#111' }}>1 Seite</option>
-                  <option value="2" style={{ color: '#111' }}>2 Seiten</option>
-                  <option value="3" style={{ color: '#111' }}>3 Seiten</option>
-                  <option value="4" style={{ color: '#111' }}>4 Seiten</option>
+                  <option value="" style={{ color: '#111' }}>∞ unbounded</option>
+                  <option value="1" style={{ color: '#111' }}>1 page</option>
+                  <option value="2" style={{ color: '#111' }}>2 pages</option>
+                  <option value="3" style={{ color: '#111' }}>3 pages</option>
+                  <option value="4" style={{ color: '#111' }}>4 pages</option>
                 </select>
               </label>
             </>
@@ -304,7 +305,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
             }}
           >
             <div style={{ fontWeight: 700, color: '#dc2626', marginBottom: 4 }}>
-              Typst-Satzfehler auf Bogen {activeSheet?.title ?? selectedSheetId}
+              Typst compile error on sheet {activeSheet?.title ?? selectedSheetId}
             </div>
             <code style={{ display: 'block', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11 }}>
               {activeProof.compileError.message}
@@ -315,7 +316,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
                 onClick={() => onSelectBlock(activeProof.compileError!.blockId!)}
                 style={{ ...pillBtn(false), marginTop: 6, borderColor: '#dc2626', color: '#dc2626' }}
               >
-                Zu Block {activeProof.compileError.blockId} springen
+                Jump to block {activeProof.compileError.blockId}
               </button>
             )}
           </div>
@@ -323,7 +324,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
 
         {!activeProof?.compileError && decodedPages.length === 0 && (
           <div style={{ opacity: 0.65, fontSize: 12, padding: 24 }}>
-            Kein Fahnenabzug verfügbar.
+            No galley proof available.
           </div>
         )}
 
@@ -383,7 +384,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
                 }}
               >
                 <span>
-                  Seite {idx + 1} von {total} · {Math.round(dims.wPt)}×{Math.round(dims.hPt)} pt
+                  Page {idx + 1} of {total} · {Math.round(dims.wPt)}×{Math.round(dims.hPt)} pt
                 </span>
                 {pageBlocks.length > 0 && (
                   <span style={{ display: 'inline-flex', gap: 3, flexWrap: 'wrap' }}>
@@ -425,7 +426,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
                 >
                   <span>⚠ {overflowText}</span>
                   <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.9 }}>
-                    Text kürzen oder Zielseiten erhöhen
+                    {getGalleyStrings('en').ui.overflowHint}
                   </span>
                 </div>
               )}

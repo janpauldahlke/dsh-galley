@@ -12,19 +12,20 @@ import type {
   GalleyTemplateBlueprint,
   SheetId,
 } from '../shared/types.ts'
+import { getGalleyStrings } from '../shared/i18n.ts'
 import type { GalleyStore } from './store.ts'
 import { getStoreForCwd } from './workspace.ts'
 
 export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
   {
-    id: 'arbeitsblatt',
-    title: 'Arbeitsblatt + Erwartungshorizont',
-    description: 'Zwei Bögen: Arbeitsblatt (A4, Ziel 1 Seite) + verknüpfter Erwartungshorizont',
+    id: 'worksheet',
+    title: 'Problem Sheet + Answer Key',
+    description: 'Two linked sheets: Problem Sheet (A4, target 1 page) + Answer Key with stale-tracking dependencies',
     source: 'builtin',
     sheets: [
       {
         id: 's1',
-        title: 'Arbeitsblatt',
+        title: 'Problem Sheet',
         geometry: {
           paper: 'a4',
           orientation: 'portrait',
@@ -32,56 +33,21 @@ export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
           targetPages: 1,
         },
         starterBlocks: [
-          { type: 'header', fields: { titel: 'Arbeitsblatt', fach: '', klasse: '', datum: '', name: '' } },
-          { type: 'task', body: 'Erste Aufgabe' },
+          { type: 'header', fields: { titel: 'Problem Sheet', fach: '', klasse: '', datum: '', name: '' } },
+          { type: 'task', body: 'First task' },
         ],
       },
       {
         id: 's2',
-        title: 'Erwartungshorizont',
+        title: 'Answer Key',
         geometry: {
           paper: 'a4',
           orientation: 'portrait',
           margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
         },
         starterBlocks: [
-          { type: 'heading', level: 1, body: 'Erwartungshorizont' },
-          { type: 'answer', body: 'Lösung' },
-        ],
-      },
-    ],
-  },
-  {
-    id: 'verlaufsplan',
-    title: 'Verlaufsplan',
-    description: 'Unterrichtsverlaufsplan im A4-Querformat (Zeit · Phase · Ablauf · Material · Ziel · Notizen)',
-    source: 'builtin',
-    sheets: [
-      {
-        id: 's1',
-        title: 'Verlaufsplan',
-        geometry: {
-          paper: 'a4',
-          orientation: 'landscape',
-          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
-          targetPages: 1,
-        },
-        starterBlocks: [
-          {
-            type: 'header',
-            fields: { titel: 'Verlaufsplan', fach: '', klasse: '', datum: '' },
-          },
-          {
-            type: 'table',
-            colWidths: ['9%', '12%', '34%', '13%', '17%', '15%'],
-            headers: ['Zeit', 'Phase', 'Ablauf (Lehrer / Schüler)', 'Material', 'Ziel', 'Notizen'],
-            rows: [
-              ['0–5 min', 'Einstieg', '', '', '', ''],
-              ['5–25 min', 'Erarbeitung', '', '', '', ''],
-              ['25–40 min', 'Sicherung', '', '', '', ''],
-              ['40–45 min', 'Abschluss', '', '', '', ''],
-            ],
-          },
+          { type: 'heading', level: 1, body: 'Answer Key' },
+          { type: 'answer', body: 'Expected answer', dependsOn: ['b2'] },
         ],
       },
     ],
@@ -89,7 +55,7 @@ export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
   {
     id: 'rfc',
     title: 'Engineering RFC',
-    description: 'Technischer Entwurfsbogen für Architektur- und Spezifikationsdokumente',
+    description: 'Single A4 sheet for technical architecture, design proposals, and specifications',
     source: 'builtin',
     sheets: [
       {
@@ -106,8 +72,8 @@ export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
   },
   {
     id: 'generic',
-    title: 'Leeres Dokument (Generic)',
-    description: 'Einzelner leerer A4-Bogen ohne Zielseitenlimit',
+    title: 'Blank Document',
+    description: 'Single blank A4 sheet with unbounded page count',
     source: 'builtin',
     sheets: [
       {
@@ -187,6 +153,7 @@ export class GalleyServiceRegistry {
     cwd: string,
   ): GalleyPreflightWarning[] {
     const warnings: GalleyPreflightWarning[] = []
+    const pf = getGalleyStrings('en').preflight
 
     // 1. Stale dependency edges
     for (const sid of packet.sheetOrder) {
@@ -201,14 +168,14 @@ export class GalleyServiceRegistry {
             blockId: b.id,
             message:
               b.stale.state === 'stale_missing_origin'
-                ? `Block ${b.id} verweist auf entfernten Block ${b.stale.origin}`
-                : `Block ${b.id} ist veraltet (Ursprung ${b.stale.origin} wurde geändert)`,
+                ? pf.staleMissingOrigin(b.id, b.stale.origin)
+                : pf.staleChangedOrigin(b.id, b.stale.origin),
           })
         }
       }
     }
 
-    // 2. Tasks without a linked answer on multi-sheet packets (e.g. Arbeitsblatt + Erwartungshorizont)
+    // 2. Tasks without a linked answer on multi-sheet packets (e.g. Problem Sheet + Answer Key)
     if (packet.sheetOrder.length >= 2) {
       const answeredTaskIds = new Set<BlockId>()
       for (const sid of packet.sheetOrder) {
@@ -226,7 +193,7 @@ export class GalleyServiceRegistry {
             severity: 'info',
             sheetId: primarySid,
             blockId: b.id,
-            message: `Aufgabe ${b.id} hat noch keine verknüpfte Lösung (dependsOn) auf einem Folgebogen`,
+            message: pf.unansweredTask(b.id),
           })
         }
       }
@@ -242,7 +209,11 @@ export class GalleyServiceRegistry {
             code: 'GALLEY_PAGE_OVERFLOW',
             severity: 'warn',
             sheetId: sid,
-            message: `Bogen "${packet.sheets[sid]?.title ?? sid}" überschreitet Ziel (${target ?? '?'} S.) um +${pr.overflowLinesOnLastPage} Zeilen`,
+            message: pf.pageOverflow(
+              packet.sheets[sid]?.title ?? sid,
+              target ?? '?',
+              pr.overflowLinesOnLastPage ?? 0,
+            ),
           })
         }
       }
@@ -266,7 +237,7 @@ export class GalleyServiceRegistry {
                 severity: 'info',
                 sheetId: sid,
                 blockId: b.id,
-                message: `Quellentext ${b.id}: Zeile ${overIdx + 1} (${logicalLines[overIdx].length} Zeichen) bricht ggf. um und verschiebt nachfolgende Randzeilennummern`,
+                message: pf.sourceLineWrap(b.id, overIdx + 1, logicalLines[overIdx].length),
               })
             }
           }

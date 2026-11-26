@@ -292,13 +292,11 @@ export function GalleyBody(props: {
     const defaultTitle =
       typeof bp !== 'string'
         ? bp.title
-        : templateId === 'arbeitsblatt'
-          ? 'Arbeitsblatt'
-          : templateId === 'verlaufsplan'
-            ? 'Verlaufsplan'
-            : templateId === 'rfc'
-              ? 'Engineering RFC'
-              : 'Dokument'
+        : templateId === 'worksheet'
+          ? 'Problem Sheet'
+          : templateId === 'rfc'
+            ? 'Engineering RFC'
+            : 'Document'
     localRevRef.current = null
     const res = await postJson(
       EDIT_ROUTE,
@@ -424,7 +422,7 @@ export function GalleyBody(props: {
           {activeData && !renamingPacket && (
             <>
               <span
-                title="Klicken zum Umbenennen"
+                title="Click to rename packet"
                 onClick={() => {
                   setPacketTitleDraft(activeData.title)
                   setRenamingPacket(true)
@@ -441,7 +439,7 @@ export function GalleyBody(props: {
                 {activeData.title}
               </span>
               <code style={{ fontSize: 11, opacity: 0.72 }}>rev {activeData.rev}</code>
-              <code style={{ fontSize: 10, opacity: 0.55 }} title="Aktive Mappe-ID">
+              <code style={{ fontSize: 10, opacity: 0.55 }} title="Active packet ID">
                 {activeData.packetId}
               </code>
             </>
@@ -450,7 +448,7 @@ export function GalleyBody(props: {
           {activeData && renamingPacket && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
               <input
-                aria-label="Mappe umbenennen"
+                aria-label="Rename packet"
                 value={packetTitleDraft}
                 onChange={(e) => setPacketTitleDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -509,8 +507,8 @@ export function GalleyBody(props: {
                 data-testid="galley-review-mode-btn"
                 title={
                   activeData.reviewMode === 'review'
-                    ? 'Review-Modus aktiv: Jede Agent-Änderung wird als Vorschlag vorgelegt'
-                    : 'Auto-Modus aktiv: Agent darf eigene/neue Blöcke direkt setzen (menschliche Blöcke bleiben geschützt)'
+                    ? 'Review mode active: every agent edit is staged as a diff proposal'
+                    : 'Auto mode active: agent can insert/edit its own blocks directly (human blocks still propose)'
                 }
                 disabled={busy}
                 onClick={() => {
@@ -542,13 +540,13 @@ export function GalleyBody(props: {
                     fontWeight: 600,
                   }}
                 >
-                  ✓ Alle ({pendingProposalCount})
+                  ✓ Accept All ({pendingProposalCount})
                 </button>
               )}
 
               <button
                 type="button"
-                title="Rückgängig (Undo)"
+                title="Undo"
                 disabled={activeData.undoDepth === 0 || busy}
                 onClick={() => { void postJson(EDIT_ROUTE, { op: 'undo' }) }}
                 style={{ ...headerBtn, opacity: activeData.undoDepth === 0 ? 0.35 : 1 }}
@@ -557,7 +555,7 @@ export function GalleyBody(props: {
               </button>
               <button
                 type="button"
-                title="Wiederholen (Redo)"
+                title="Redo"
                 disabled={activeData.redoDepth === 0 || busy}
                 onClick={() => { void postJson(EDIT_ROUTE, { op: 'redo' }) }}
                 style={{ ...headerBtn, opacity: activeData.redoDepth === 0 ? 0.35 : 1 }}
@@ -573,7 +571,7 @@ export function GalleyBody(props: {
             onClick={() => setShowMappenDrawer((v) => !v)}
             style={headerBtn}
           >
-            Mappen ({payload?.packets?.length ?? 0}) ▾
+            Packets ({payload?.packets?.length ?? 0}) ▾
           </button>
 
           {activeData && (
@@ -589,7 +587,7 @@ export function GalleyBody(props: {
 
           <button
             type="button"
-            title="Ansichtsmodus wechseln (Auto / Split / Tabs)"
+            title="Switch layout mode (Auto / Split / Tabs)"
             onClick={() =>
               setOverridePersisted(
                 layoutOverride === 'auto' ? 'wide' : layoutOverride === 'wide' ? 'narrow' : 'auto',
@@ -619,7 +617,7 @@ export function GalleyBody(props: {
             fontWeight: 600,
           }}
         >
-          ⟳ Verbinde erneut mit Host… (lokale Eingaben bleiben erhalten)
+          ⟳ Reconnecting to host… (local edits are preserved)
         </div>
       )}
 
@@ -681,14 +679,14 @@ export function GalleyBody(props: {
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontWeight: 600, color: '#d97706' }}>
-              ⚑ Preflight-Hinweise ({activeData.preflight.length})
+              ⚑ Preflight ({activeData.preflight.length})
             </span>
             <button
               type="button"
               onClick={() => setShowPreflightDetails((v) => !v)}
               style={{ ...headerBtn, padding: '0 6px', fontSize: 10 }}
             >
-              {showPreflightDetails ? 'Ausblenden ▴' : 'Details ▾'}
+              {showPreflightDetails ? 'Hide ▴' : 'Details ▾'}
             </button>
           </div>
           {showPreflightDetails &&
@@ -710,7 +708,7 @@ export function GalleyBody(props: {
                     }}
                     style={{ ...headerBtn, padding: '0 5px', fontSize: 10 }}
                   >
-                    Springen
+                    Jump
                   </button>
                 )}
               </div>
@@ -718,7 +716,7 @@ export function GalleyBody(props: {
         </div>
       )}
 
-      {/* Low-friction Mappen CRUD & Template Blueprints Drawer */}
+      {/* Low-friction Packets CRUD & Template Blueprints Drawer */}
       {showMappenDrawer && payload && (
         <div
           data-testid="galley-mappen-drawer"
@@ -734,10 +732,10 @@ export function GalleyBody(props: {
             overflowY: 'auto',
           }}
         >
-          {/* Current Mappe actions */}
+          {/* Current Packet actions */}
           {activeData && (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 600, fontSize: 11, opacity: 0.8 }}>Aktive Mappe: {activeData.title}</span>
+              <span style={{ fontWeight: 600, fontSize: 11, opacity: 0.8 }}>Active packet: {activeData.title}</span>
               <div style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
                 <button
                   type="button"
@@ -749,7 +747,7 @@ export function GalleyBody(props: {
                   }}
                   style={headerBtn}
                 >
-                  ✎ Umbenennen
+                  ✎ Rename
                 </button>
                 <button
                   type="button"
@@ -761,18 +759,18 @@ export function GalleyBody(props: {
                   }}
                   style={headerBtn}
                 >
-                  ⧉ Duplizieren
+                  ⧉ Duplicate
                 </button>
                 <button
                   type="button"
                   data-testid="galley-save-template-toggle"
                   onClick={() => {
-                    setTemplateSaveDraft(`${activeData.title} Vorlage`)
+                    setTemplateSaveDraft(`${activeData.title} Template`)
                     setShowTemplateSaveInput((v) => !v)
                   }}
                   style={headerBtn}
                 >
-                  ★ Als Vorlage speichern
+                  ★ Save as Template
                 </button>
                 <button
                   type="button"
@@ -781,7 +779,7 @@ export function GalleyBody(props: {
                   onClick={() => { void handleDeletePacket(activeData.packetId) }}
                   style={{ ...headerBtn, color: '#dc2626', borderColor: 'rgba(220,38,38,0.45)' }}
                 >
-                  🗑 Löschen
+                  🗑 Delete
                 </button>
               </div>
             </div>
@@ -790,8 +788,8 @@ export function GalleyBody(props: {
           {showTemplateSaveInput && activeData && (
             <div style={{ display: 'flex', gap: 4 }}>
               <input
-                aria-label="Vorlagenname"
-                placeholder="Name der wiederverwendbaren Vorlage…"
+                aria-label="Template name"
+                placeholder="Reusable template name…"
                 value={templateSaveDraft}
                 onChange={(e) => setTemplateSaveDraft(e.target.value)}
                 style={{
@@ -816,12 +814,12 @@ export function GalleyBody(props: {
                   )
                   if (res) {
                     setShowTemplateSaveInput(false)
-                    setStatusToast(`Vorlage „${templateSaveDraft.trim()}“ gespeichert`)
+                    setStatusToast(`Saved template "${templateSaveDraft.trim()}"`)
                   }
                 }}
                 style={{ ...headerBtn, fontWeight: 600 }}
               >
-                Speichern
+                Save
               </button>
             </div>
           )}
@@ -829,7 +827,7 @@ export function GalleyBody(props: {
           {/* Existing packets in workspace */}
           {payload.packets.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <div style={{ fontSize: 11, opacity: 0.72 }}>Mappen im Arbeitsverzeichnis ({payload.packets.length}):</div>
+              <div style={{ fontSize: 11, opacity: 0.72 }}>Packets in workspace ({payload.packets.length}):</div>
               {payload.packets.map((p) => {
                 const isCurrent = activeData?.packetId === p.id
                 return (
@@ -868,7 +866,7 @@ export function GalleyBody(props: {
                     </button>
                     <button
                       type="button"
-                      title={`Mappe ${p.title} löschen`}
+                      title={`Delete packet ${p.title}`}
                       disabled={busy}
                       onClick={() => { void handleDeletePacket(p.id) }}
                       style={{ ...headerBtn, padding: '0 5px', fontSize: 10 }}
@@ -881,12 +879,12 @@ export function GalleyBody(props: {
             </div>
           )}
 
-          {/* Create new Mappe from Builtin / Plugin / Workspace Templates */}
+          {/* Create new Packet from Builtin / Plugin / Workspace Templates */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5, paddingTop: 4, borderTop: '1px solid rgba(128,128,128,0.18)' }}>
-            <div style={{ fontSize: 11, opacity: 0.72 }}>Neue Mappe aus Vorlage anlegen:</div>
+            <div style={{ fontSize: 11, opacity: 0.72 }}>Create new packet from template:</div>
             <input
-              aria-label="Titel der neuen Mappe"
-              placeholder="Titel der neuen Mappe (optional)…"
+              aria-label="New packet title"
+              placeholder="New packet title (optional)…"
               value={newTitleDraft}
               onChange={(e) => setNewTitleDraft(e.target.value)}
               style={{
@@ -913,7 +911,7 @@ export function GalleyBody(props: {
                   {tpl.source === 'workspace' && (
                     <button
                       type="button"
-                      title="Gespeicherte Vorlage entfernen"
+                      title="Delete saved template"
                       onClick={() => {
                         void postJson(EDIT_ROUTE, { op: 'template-delete', templateId: tpl.id }, true)
                       }}
@@ -942,7 +940,7 @@ export function GalleyBody(props: {
             fontSize: 11,
           }}
         >
-          <span>Format exportieren:</span>
+          <span>Export format:</span>
           {(['pdf', 'typ', 'md', 'tex'] as const).map((fmt) => (
             <button key={fmt} type="button" style={headerBtn} onClick={() => { void handleExport(fmt) }}>
               .{fmt.toUpperCase()}
@@ -965,7 +963,7 @@ export function GalleyBody(props: {
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <strong style={{ color: '#16a34a' }}>✓ Export bereitgestellt</strong>
+            <strong style={{ color: '#16a34a' }}>✓ Export ready</strong>
             <button type="button" onClick={() => setExportedFiles(null)} style={headerBtn}>
               ✕
             </button>
@@ -993,7 +991,7 @@ export function GalleyBody(props: {
                   onClick={() => { void navigator.clipboard?.writeText(f.path) }}
                   style={headerBtn}
                 >
-                  Pfad kopieren
+                  Copy path
                 </button>
               </span>
             </div>
@@ -1001,15 +999,15 @@ export function GalleyBody(props: {
         </div>
       )}
 
-      {/* 3. Initial loading / Host offline / Empty Mappe states (Spec 04 §8) */}
+      {/* 3. Initial loading / Host offline / Empty Packet states (Spec 04 §8) */}
       {!payload && !reconnecting && (
-        <div style={{ padding: 24, opacity: 0.7, fontSize: 12 }}>Lade Galley-Status…</div>
+        <div style={{ padding: 24, opacity: 0.7, fontSize: 12 }}>Loading Galley state…</div>
       )}
 
       {!payload && reconnecting && (
         <div style={{ padding: 24, opacity: 0.85, fontSize: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Galley-Host derzeit nicht erreichbar</div>
-          <div style={{ opacity: 0.75 }}>Automatischer Neuverbindungsversuch alle 2 Sekunden…</div>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Galley host unreachable</div>
+          <div style={{ opacity: 0.75 }}>Retrying automatically every 2 seconds…</div>
         </div>
       )}
 
@@ -1028,14 +1026,14 @@ export function GalleyBody(props: {
             overflowY: 'auto',
           }}
         >
-          <div style={{ fontWeight: 700, fontSize: 15 }}>Mappe öffnen · Druck und Satz</div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Open Packet · Galley Workbench</div>
           <div style={{ fontSize: 12, opacity: 0.76, maxWidth: 340 }}>
-            Wähle eine Vorlage für den gemeinsamen Satz mit sofortigem Typst-A4-Fahnenabzug:
+            Choose a template for block-addressed co-authoring with instant Typst page proofs:
           </div>
 
           <input
-            aria-label="Mappentitel"
-            placeholder="Titel (z. B. Brüche: Addieren)…"
+            aria-label="Packet title"
+            placeholder="Title (optional)…"
             value={newTitleDraft}
             onChange={(e) => setNewTitleDraft(e.target.value)}
             style={{
@@ -1061,7 +1059,7 @@ export function GalleyBody(props: {
                 style={{
                   ...headerBtn,
                   padding: '8px 12px',
-                  fontWeight: tpl.id === 'arbeitsblatt' || tpl.id === 'verlaufsplan' ? 600 : 400,
+                  fontWeight: tpl.id === 'worksheet' || tpl.source === 'plugin' ? 600 : 400,
                 }}
               >
                 {tpl.source === 'workspace' ? '★ ' : tpl.source === 'plugin' ? '◆ ' : ''}
@@ -1072,7 +1070,7 @@ export function GalleyBody(props: {
 
           {payload.packets.length > 0 && (
             <div style={{ marginTop: 8, width: '100%', maxWidth: 320, textAlign: 'left', fontSize: 12 }}>
-              <div style={{ opacity: 0.7, marginBottom: 4 }}>Vorhandene Mappen im Projekt:</div>
+              <div style={{ opacity: 0.7, marginBottom: 4 }}>Existing packets in workspace:</div>
               {payload.packets.map((p) => (
                 <div key={p.id} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
                   <button
@@ -1084,7 +1082,7 @@ export function GalleyBody(props: {
                   </button>
                   <button
                     type="button"
-                    title="Mappe löschen"
+                    title="Delete packet"
                     onClick={() => { void handleDeletePacket(p.id) }}
                     style={{ ...headerBtn, padding: '5px 8px' }}
                   >
@@ -1120,7 +1118,7 @@ export function GalleyBody(props: {
                   background: narrowTab === 'proof' ? 'rgba(128,128,128,0.2)' : 'transparent',
                 }}
               >
-                Fahnenabzug (Proof)
+                Galley Proof
               </button>
               <button
                 type="button"
@@ -1132,7 +1130,7 @@ export function GalleyBody(props: {
                   background: narrowTab === 'blocks' ? 'rgba(128,128,128,0.2)' : 'transparent',
                 }}
               >
-                Blöcke ({activeSheet.blocks.length})
+                Blocks ({activeSheet.blocks.length})
               </button>
             </div>
           )}

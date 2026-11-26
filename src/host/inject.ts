@@ -253,7 +253,7 @@ export function formatGalleyDelta(input: FormatGalleyDeltaInput): string {
 
   const renderAttempt = (previewLen: number, maxBlocksPerSheet: number): string => {
     const lines: string[] = []
-    lines.push(`[dsh-galley · Mappe "${title}" · rev ${packet.rev} · mode ${mode}]`)
+    lines.push(`[dsh-galley · Packet "${title}" · rev ${packet.rev} · mode ${mode}]`)
     lines.push('Outline:')
     for (const sid of packet.sheetOrder) {
       const sh = packet.sheets[sid]

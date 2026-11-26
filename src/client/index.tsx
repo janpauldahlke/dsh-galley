@@ -29,7 +29,7 @@ export function apply(ctx: Context): void {
         id: 'galley',
         order: 285,
         title: () => TAB_TITLE,
-        description: () => 'Document co-authoring & Typst A4 proof (Druck und Satz): block packets, instant native render, deterministic PDF/DOCX',
+        description: () => 'Document co-authoring & Typst page proofing: block packets, instant native render, deterministic PDF/DOCX export',
         icon: GalleyIcon,
       },
     ],

@@ -91,15 +91,15 @@ export type { Arm, ArmName } from './arms/index.ts'
 
 /** The sample packet the health probe renders (proves the native arm in-process). */
 const SAMPLE_BLOCKS: GalleyBlock[] = [
-  { id: 'b1', kind: 'header', text: 'Arbeitsblatt · Druck und Satz' },
+  { id: 'b1', kind: 'header', text: 'Galley Workbench · Typesetting Probe' },
   { id: 'b2', kind: 'heading', level: 1, text: 'Galley Proof' },
   {
     id: 'b3',
     kind: 'prose',
     text: 'Hello from the native Typst arm. This paragraph contains markup metacharacters that must stay inert: # $ [ ] { } _ ^ | and a quote "here" plus a backslash here.',
   },
-  { id: 'b4', kind: 'task', text: 'Aufgabe: prove the dual face loads.' },
-  { id: 'b5', kind: 'answer', text: 'Lösung: the host compiled and the pane rendered the SVG.' },
+  { id: 'b4', kind: 'task', text: 'Task: prove the dual face loads.' },
+  { id: 'b5', kind: 'answer', text: 'Answer: the host compiled and the pane rendered the SVG.' },
 ]
 
 export interface RenderReceipt {
@@ -271,10 +271,14 @@ export function registerGalleyTools(ctx: Context): () => void {
         template: {
           type: 'string',
           description:
-            'Built-in ("arbeitsblatt" | "verlaufsplan" | "rfc" | "generic") or custom/plugin template id. ' +
-            '"verlaufsplan" opens A4 landscape with teacher header + 6-col table [Zeit, Phase, Ablauf (Lehrer / Schüler), Material, Ziel, Notizen] (keep "Notizen" cells empty "" for handwritten teacher notes).',
+            'Built-in ("worksheet" | "rfc" | "generic") or domain-plugin / workspace template id.',
         },
         title: { type: 'string' },
+        locale: {
+          type: 'string',
+          enum: ['en', 'de'],
+          description: 'Optional document print label locale ("en" default; "de" for German print labels).',
+        },
         orientation: { type: 'string', enum: ['portrait', 'landscape'] },
         targetPages: { type: 'integer' },
         blocks: {
@@ -381,10 +385,10 @@ export function registerGalleyTools(ctx: Context): () => void {
       'The single writer for blocks AND sheets (never edit `.dsh/galley/*` files directly). ' +
       'Block ops: `insert` | `patch` | `move` | `remove`. Sheet ops: `sheet-add` | `sheet-update` | `sheet-remove`. ' +
       'Conventions: (1) On multi-sheet packets, `insert` REQUIRES `sheetId` (or `beforeId`/`afterId`); omitting `beforeId`/`afterId` appends to the end of `sheetId`. ' +
-      '(2) `task` auto-prepends "Aufgabe N" unless `body` already starts with "Aufgabe N". ' +
+      '(2) `task` auto-prepends "Task N" (or "Aufgabe N" when packet locale is "de") unless `body` already starts with a numbered prefix. ' +
       '(3) `dependsOn: ["b2"]` accepts block ID strings on both `insert` and `patch` (auto-snapshots `sinceHash`). ' +
-      '(4) `table` accepts 2D strings with mini-markup (`headers: ["Zeit","Phase"]`, `rows: [["10m", "**Einstieg**"]]`) + optional `colWidths` (`["15%","85%"]`). ' +
-      '(5) `header.fields.name`: pass `name: ""` for a student fill-in line; omit `name` on teacher-only sheets.',
+      '(4) `table` accepts 2D strings with mini-markup (`headers: ["Col A","Col B"]`, `rows: [["1", "**Bold**"]]`) + optional `colWidths` (`["20%","80%"]`). ' +
+      '(5) `header.fields`: accepts `{ title, subtitle, meta, date, name }` (or `{ titel, fach, klasse, datum, name }`); pass `name: ""` for a blank fill-in line, or omit `name` when not needed.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -454,7 +458,7 @@ export function registerGalleyTools(ctx: Context): () => void {
   register({
     name: 'galley_annotate',
     description:
-      'Add / list / resolve / unresolve a non-printing margin note (Randnotiz) anchored to a block (shown in the Galley pane, never printed on the PDF).',
+      'Add / list / resolve / unresolve a non-printing margin note anchored to a block (shown in the Galley pane, never printed on the PDF).',
     parameters: {
       type: 'object',
       additionalProperties: false,

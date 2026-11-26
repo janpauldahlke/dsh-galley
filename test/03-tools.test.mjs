@@ -457,14 +457,14 @@ test('error codes: invalid slot / unknown export format are INVALID_PARAMS', asy
   assert.equal(badFmt.code, Err.INVALID_PARAMS)
 })
 
-test('M1.6 hardening: Inline[] + lineNumbers patch, optional baseHash, cross-sheet move/remove, arbeitsblatt scaffold + id switch', async () => {
-  const ab = await galleyOpen(deps, { template: 'arbeitsblatt', title: 'Brüche' })
+test('M1.6 hardening: Inline[] + lineNumbers patch, optional baseHash, cross-sheet move/remove, worksheet scaffold + id switch', async () => {
+  const ab = await galleyOpen(deps, { template: 'worksheet', title: 'Fractions' })
   assert.equal(ab.ok, true)
   assert.deepEqual(ab.sheetOrder, ['s1', 's2'])
-  assert.ok(ab.proofs.s1 && ab.proofs.s2, 'arbeitsblatt open computes proofs for both s1 and s2')
+  assert.ok(ab.proofs.s1 && ab.proofs.s2, 'worksheet open computes proofs for both s1 and s2')
   const loadedAb = store.load(ab.packetId)
   assert.equal(loadedAb.sheets.s1.geometry.targetPages, 1)
-  assert.equal(loadedAb.sheets.s2.title, 'Erwartungshorizont')
+  assert.equal(loadedAb.sheets.s2.title, 'Answer Key')
 
   // Patching Inline[] body + lineNumbers WITHOUT baseHash works on agent blocks.
   const srcIns = await galleyEditBlock(deps, {

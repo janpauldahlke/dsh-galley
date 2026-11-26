@@ -1,9 +1,9 @@
 # dsh-galley
 
-> **Status:** `0.1.0` — M2.5 Workbench CRUD, Review Lock, `ctx.galley` Service & Typst Proof
+> **Status:** `0.1.0` — M3.2 Domain-Neutral English Workbench, KV-Cache-Safe Agent Delta Inject, `ctx.galley` Service & Native Typst Proofing
 
-Shared volatile **document workbench & typesetter** (*Druck und Satz*) for
-human + agent co-authoring in the **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) web and desktop UI.
+Shared volatile **document workbench & typesetter** for human + agent co-authoring
+in the **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) web and desktop UI.
 
 npm package (planned) and GitHub repo share the name `dsh-galley`
 ([`janpauldahlke/dsh-galley`](https://github.com/janpauldahlke/dsh-galley)).
@@ -75,12 +75,21 @@ instant local **Typst** page typesetting and deterministic exporters.
 
 | Tool | Role |
 | --- | --- |
-| `galley_open` | Initialize or switch active galley packet (*Mappe*), template (`arbeitsblatt`, `rfc`, `generic`), and page geometry |
-| `galley_status` | Compact outline: sheets, block IDs, types, hashes, word counts, page count, overflow, stale links, proposals & annotations |
+| `galley_open` | Create or switch active galley packet, built-in (`worksheet`, `rfc`, `generic`) or plugin/workspace template, and page geometry |
+| `galley_status` | Compact outline: sheets, block IDs, types, hashes, word counts, attributed `recentChanges` journal, preflight warnings, proposals, annotations & page proofs |
 | `galley_read_block` | Read verbatim content of specific block ID(s) with neighbor context and dependency edges |
-| `galley_edit_block` | Single writer (`insert` / `patch` / `move` / `remove`): patches on human-origin blocks stage inline diff proposals; returns compact Typst proof receipt |
-| `galley_annotate` | Add, list, resolve, or unresolve non-destructive margin notes (*Randnotizen*) on a block |
+| `galley_edit_block` | Single writer for blocks (`insert` / `patch` / `move` / `remove`) and sheets (`sheet-add` / `sheet-update` / `sheet-remove`); human-origin block edits stage inline diff proposals |
+| `galley_annotate` | Add, list, resolve, or unresolve non-printing margin notes anchored to a block |
 | `galley_export` | Compile sheet/packet to `.pdf`, `.typ`, `.tex`, or `.md` (`.docx` landing in M4) |
+
+---
+
+## Bounded Context & Domain Packs (`ctx.galley`)
+
+`dsh-galley` is intentionally **domain-neutral and English-first** (`src/shared/i18n.ts` keeps `en` active with `de` stubbed for printed document labels):
+
+- Core ships only foundation templates (`worksheet` Problem Sheet + Answer Key, `rfc` Engineering RFC, `generic` Blank Document) so academics, engineers, writers, and educators share an uncluttered workbench.
+- Domain-specific packs (e.g. `dsh-galley-didaktik` for German teaching sheets *Arbeitsblatt*, *Verlaufsplan*, *Quellensammlung*, or `dsh-galley-academic` for research handouts/preprints) live in separate lightweight Cordis leaf bundles calling `ctx.galley.registerTemplate(...)` and `ctx.galley.registerPreflight(...)`.
 
 ---
 

@@ -27,14 +27,14 @@ import {
 } from './paneModel.ts'
 
 const ALL_BLOCK_TYPES: { type: BlockType; label: string; icon: string }[] = [
-  { type: 'header', label: 'Kopfbogen (header)', icon: '▤' },
-  { type: 'heading', label: 'Überschrift (heading)', icon: '§' },
-  { type: 'prose', label: 'Fließtext (prose)', icon: '¶' },
-  { type: 'source_text', label: 'Quellentext (source_text)', icon: '❝' },
-  { type: 'task', label: 'Aufgabe (task)', icon: '☑' },
-  { type: 'table', label: 'Tabelle (table)', icon: '⊞' },
-  { type: 'callout', label: 'Hinweisbox (callout)', icon: '◈' },
-  { type: 'answer', label: 'Lösung (answer)', icon: '✓' },
+  { type: 'header', label: 'Header (header)', icon: '▤' },
+  { type: 'heading', label: 'Heading (heading)', icon: '§' },
+  { type: 'prose', label: 'Prose (prose)', icon: '¶' },
+  { type: 'source_text', label: 'Source Text (source_text)', icon: '❝' },
+  { type: 'task', label: 'Task (task)', icon: '☑' },
+  { type: 'table', label: 'Table (table)', icon: '⊞' },
+  { type: 'callout', label: 'Callout (callout)', icon: '◈' },
+  { type: 'answer', label: 'Answer (answer)', icon: '✓' },
 ]
 
 function iconForType(type: BlockType): string {
@@ -43,7 +43,7 @@ function iconForType(type: BlockType): string {
 
 function summarizePatchSide(patch: Record<string, unknown> | undefined): string {
   if (!patch) return '—'
-  if (patch.remove === true) return 'Block entfernen'
+  if (patch.remove === true) return 'Remove block'
   if (patch.block && typeof patch.block === 'object') {
     const b = patch.block as Block
     return `[${b.type}] ${flattenBlockPreview(b, 80)}`
@@ -137,12 +137,12 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
   const renderProposalCard = (prop: GalleyProposal): ReactNode => {
     const opLabel =
       prop.op === 'insert'
-        ? 'Neuer Block vorgeschlagen'
+        ? 'Proposed new block'
         : prop.op === 'remove'
-          ? 'Block-Löschung vorgeschlagen'
+          ? 'Proposed block removal'
           : prop.op === 'move'
-            ? 'Verschiebung vorgeschlagen'
-            : 'Änderungsvorschlag'
+            ? 'Proposed block move'
+            : 'Proposed edit'
     return (
       <div
         key={prop.id}
@@ -164,17 +164,17 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
         <div style={{ fontWeight: 600 }}>
           Δ Agent: {opLabel} ({prop.id})
           {prop.status === 'conflicted'
-            ? ' — Konflikt (Inhalt inzwischen geändert)'
+            ? ' — Conflict (block modified meanwhile)'
             : ''}
         </div>
         {prop.beforePatch && (
           <div style={{ opacity: 0.78 }}>
-            <span style={{ color: '#dc2626', fontWeight: 600 }}>− Vorher: </span>
+            <span style={{ color: '#dc2626', fontWeight: 600 }}>− Before: </span>
             {summarizePatchSide(prop.beforePatch)}
           </div>
         )}
         <div>
-          <span style={{ color: '#16a34a', fontWeight: 600 }}>+ Vorschlag: </span>
+          <span style={{ color: '#16a34a', fontWeight: 600 }}>+ Proposed: </span>
           {summarizePatchSide(prop.proposedPatch)}
         </div>
         <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
@@ -185,7 +185,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
               onClick={() => { void onDecideProposal(prop.id, 'accept') }}
               style={{ ...iconBtn, borderColor: '#16a34a', color: '#16a34a', fontWeight: 600 }}
             >
-              ✓ Annehmen
+              ✓ Accept
             </button>
           )}
           <button
@@ -194,7 +194,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
             onClick={() => { void onDecideProposal(prop.id, 'revert') }}
             style={iconBtn}
           >
-            ✕ Verwerfen
+            ✕ Revert
           </button>
         </div>
       </div>
@@ -252,7 +252,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
         }}
       >
         <span style={{ fontWeight: 600 }}>
-          Blöcke · {sheet.title} <span style={{ opacity: 0.65 }}>({sheet.blocks.length})</span>
+          Blocks · {sheet.title} <span style={{ opacity: 0.65 }}>({sheet.blocks.length})</span>
         </span>
         <button
           type="button"
@@ -260,7 +260,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
           onClick={() => setInsertAfterTarget((cur) => (cur === '__end__' ? null : '__end__'))}
           style={{ ...iconBtn, padding: '2px 8px', fontWeight: 600 }}
         >
-          + Block anfügen
+          + Add Block
         </button>
       </div>
 
@@ -270,7 +270,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
 
         {sheet.blocks.length === 0 && pendingInsertProposals.length === 0 && insertAfterTarget !== '__end__' && (
           <div style={{ opacity: 0.7, fontSize: 12, padding: '16px 4px', textAlign: 'center' }}>
-            Noch keine Blöcke auf diesem Bogen — über „+ Block anfügen“ starten.
+            No blocks on this sheet yet — click "+ Add Block" to start.
           </div>
         )}
 
@@ -393,7 +393,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                         background: 'rgba(217,119,6,0.14)',
                       }}
                     >
-                      Δ {prop.status === 'conflicted' ? 'Konflikt' : 'Vorschlag'}
+                      Δ {prop.status === 'conflicted' ? 'Conflict' : 'Proposal'}
                     </button>
                   ))}
 
@@ -416,7 +416,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
                   <button
                     type="button"
-                    title="Randnotiz"
+                    title="Margin note"
                     onClick={() => setNoteOpenBlockId((cur) => (cur === block.id ? null : block.id))}
                     style={iconBtn}
                   >
@@ -424,7 +424,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                   </button>
                   <button
                     type="button"
-                    title="Block danach einfügen"
+                    title="Insert block after"
                     onClick={() => setInsertAfterTarget((cur) => (cur === block.id ? null : block.id))}
                     style={iconBtn}
                   >
@@ -432,7 +432,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                   </button>
                   <button
                     type="button"
-                    title="Nach oben"
+                    title="Move up"
                     disabled={index === 0 || busy}
                     onClick={() => { void onMoveBlock(sheet.id, block.id, 'up') }}
                     style={{ ...iconBtn, opacity: index === 0 ? 0.35 : 1 }}
@@ -441,7 +441,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                   </button>
                   <button
                     type="button"
-                    title="Nach unten"
+                    title="Move down"
                     disabled={index === sheet.blocks.length - 1 || busy}
                     onClick={() => { void onMoveBlock(sheet.id, block.id, 'down') }}
                     style={{ ...iconBtn, opacity: index === sheet.blocks.length - 1 ? 0.35 : 1 }}
@@ -450,7 +450,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                   </button>
                   <button
                     type="button"
-                    title="Block entfernen"
+                    title="Remove block"
                     disabled={busy}
                     onClick={() => { void onRemoveBlock(sheet.id, block.id) }}
                     style={iconBtn}
@@ -492,15 +492,15 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                         onClick={() => { void onResolveAnnotation(block.id, ann.id) }}
                         style={iconBtn}
                       >
-                        Erledigt
+                        Resolve
                       </button>
                     </div>
                   ))}
                   {noteOpenBlockId === block.id && (
                     <div style={{ display: 'flex', gap: 4 }}>
                       <input
-                        aria-label={`Randnotiz für ${block.id}`}
-                        placeholder="Randnotiz hinzufügen (max. 800 Zeichen)…"
+                        aria-label={`Margin note for ${block.id}`}
+                        placeholder="Add margin note (max 800 chars)…"
                         maxLength={800}
                         value={noteDraft}
                         onChange={(e) => setNoteDraft(e.target.value)}
@@ -526,7 +526,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                         }}
                         style={iconBtn}
                       >
-                        Senden
+                        Add
                       </button>
                     </div>
                   )}

@@ -5,6 +5,9 @@
  * (host + client import this module). Constants (PLUGIN, routes, tab) are
  * runtime values; the interfaces are the v1 block model, frozen per spec 01.
  */
+import type { GalleyLocale } from './i18n.ts'
+export type { GalleyLocale }
+
 export const PLUGIN = 'dsh-galley'
 export const VERSION = '0.1.0'
 export const HEALTH_ROUTE = '/api/galley/health'
@@ -184,9 +187,11 @@ export type ReviewMode = 'auto' | 'review'
 
 export interface GalleyPacket {
   id: PacketId
-  /** Built-in ('arbeitsblatt' | 'verlaufsplan' | 'rfc' | 'generic') or custom/Cordis template id. */
+  /** Built-in ('worksheet' | 'rfc' | 'generic') or custom/Cordis plugin template id. */
   template: string
   title: string
+  /** Optional document print locale ('en' default; 'de' set by German domain templates). */
+  locale?: GalleyLocale
   /** 'auto' (default): agent patches on human blocks propose; 'review': ALL agent ops propose. */
   reviewMode?: ReviewMode
   /** monotonically increasing; +1 per committed change (incl. undo/redo/proposals). */
@@ -208,6 +213,8 @@ export interface GalleyTemplateBlueprint {
   id: string
   title: string
   description?: string
+  /** Optional print locale inherited by packets created from this template (default 'en'). */
+  locale?: GalleyLocale
   source?: 'builtin' | 'plugin' | 'workspace'
   sheets: {
     id: SheetId

@@ -7,6 +7,7 @@
  * conflict reconciliation without a DOM.
  */
 import { parseInlines, serializeInlines } from '../shared/inlineMarkup.ts'
+import { getGalleyStrings, type GalleyLocale } from '../shared/i18n.ts'
 import type {
   Block,
   BlockId,
@@ -80,13 +81,17 @@ export function decodeSvgDataUri(uriOrSvg: string): string {
   return ''
 }
 
-export function formatOverflowBanner(overflowLines: number, targetPages?: number): string | null {
+export function formatOverflowBanner(
+  overflowLines: number,
+  targetPages?: number,
+  locale?: GalleyLocale,
+): string | null {
   if (!overflowLines || overflowLines <= 0) return null
+  const ui = getGalleyStrings(locale).ui
   if (targetPages && targetPages > 0) {
-    const unit = targetPages === 1 ? 'Seite' : 'Seiten'
-    return `+${overflowLines} Zeilen über ${targetPages} ${unit}`
+    return ui.overflowOverTarget(overflowLines, targetPages)
   }
-  return `+${overflowLines} Zeilen Überlauf`
+  return ui.overflowGeneric(overflowLines)
 }
 
 // ── Block preview & starter templates ───────────────────────────────────────
@@ -118,11 +123,11 @@ export function flattenBlockPreview(block: Block, maxChars = 60): string {
   if (block.type === 'header') {
     const f = block.fields ?? ({} as HeaderBlock['fields'])
     const joined = [f.titel, f.fach, f.klasse, f.datum].filter(Boolean).join(' · ')
-    return (joined || 'Kopfbogen').slice(0, maxChars)
+    return (joined || 'Header').slice(0, maxChars)
   }
   if (block.type === 'table') {
     const head = (block.headers ?? []).map((c) => plainInlineText(c)).join(' | ')
-    return (head || `${block.rows?.length ?? 0} Zeilen`).slice(0, maxChars)
+    return (head || `${block.rows?.length ?? 0} rows`).slice(0, maxChars)
   }
   const body = (block as { body?: Inline[] }).body
   const raw = plainInlineText(body).replace(/\s+/g, ' ').trim()
@@ -134,48 +139,48 @@ export function createStarterBlockPayload(type: BlockType): Record<string, unkno
     case 'header':
       return {
         type: 'header',
-        fields: { titel: 'Arbeitsblatt', fach: '', klasse: '', datum: '', name: '' },
+        fields: { titel: 'Document', fach: '', klasse: '', datum: '', name: '' },
       }
     case 'heading':
       return {
         type: 'heading',
         level: 2,
         numbered: false,
-        body: [{ t: 'text', v: 'Abschnitt' }],
+        body: [{ t: 'text', v: 'Section' }],
       }
     case 'prose':
       return {
         type: 'prose',
-        body: [{ t: 'text', v: 'Neuer Absatz.' }],
+        body: [{ t: 'text', v: 'New paragraph.' }],
       }
     case 'source_text':
       return {
         type: 'source_text',
-        title: 'Quellentext',
+        title: 'Source Excerpt',
         lineNumbers: { every: 5, start: 1 },
-        body: [{ t: 'text', v: 'Erste Zeile des Quellentextes.\nZweite Zeile.' }],
+        body: [{ t: 'text', v: 'First line of source text.\nSecond line.' }],
       }
     case 'task':
       return {
         type: 'task',
-        body: [{ t: 'text', v: 'Bearbeiten Sie die folgende Aufgabe.' }],
+        body: [{ t: 'text', v: 'Complete the following task.' }],
       }
     case 'table':
       return {
         type: 'table',
-        headers: [[{ t: 'text', v: 'Begriff' }], [{ t: 'text', v: 'Bedeutung' }]],
-        rows: [[[{ t: 'text', v: 'Beispiel' }], [{ t: 'text', v: 'Erklärung' }]]],
+        headers: [[{ t: 'text', v: 'Column 1' }], [{ t: 'text', v: 'Column 2' }]],
+        rows: [[[{ t: 'text', v: 'Item' }], [{ t: 'text', v: 'Description' }]]],
       }
     case 'callout':
       return {
         type: 'callout',
         tone: 'info',
-        body: [{ t: 'text', v: 'Hinweis für die Bearbeitung.' }],
+        body: [{ t: 'text', v: 'Important note.' }],
       }
     case 'answer':
       return {
         type: 'answer',
-        body: [{ t: 'text', v: 'Erwartete Lösung.' }],
+        body: [{ t: 'text', v: 'Expected answer.' }],
       }
   }
 }
@@ -221,7 +226,7 @@ export function blockToDraftBuffer(block: Block): BlockDraftBuffer {
     lineEvery: 0,
     lineStart: 1,
     calloutTone: 'info',
-    tableHeaders: ['Spalte 1', 'Spalte 2'],
+    tableHeaders: ['Column 1', 'Column 2'],
     tableRows: [['', '']],
     slot: block.slot ? JSON.parse(JSON.stringify(block.slot)) : { mode: 'full' },
     dependsOnIds: (block.dependsOn ?? []).map((d) => d.id),
@@ -257,7 +262,7 @@ export function blockToDraftBuffer(block: Block): BlockDraftBuffer {
       base.tableHeaders =
         block.headers && block.headers.length > 0
           ? block.headers.map((c) => serializeInlines(c))
-          : ['Spalte 1']
+          : ['Column 1']
       base.tableRows =
         block.rows && block.rows.length > 0
           ? block.rows.map((r) => r.map((c) => serializeInlines(c)))

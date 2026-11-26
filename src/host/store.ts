@@ -378,7 +378,7 @@ export class GalleyStore {
           margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
           ...(opts?.targetPages !== undefined && opts.targetPages > 0 ? { targetPages: Math.floor(opts.targetPages) } : {}),
         }
-        createdTitle = opts?.title?.trim() || `Bogen ${p.sheetOrder.length + 1}`
+        createdTitle = opts?.title?.trim() || `Sheet ${p.sheetOrder.length + 1}`
         p.sheets[createdSheetId] = {
           id: createdSheetId,
           title: createdTitle,
@@ -522,14 +522,15 @@ export class GalleyStore {
       .replace(/[^\w\s-]/g, '')
       .trim()
       .replace(/[\s_]+/g, '-')
-      .toLowerCase() || 'vorlage'
-    const reserved = new Set(['arbeitsblatt', 'verlaufsplan', 'rfc', 'generic'])
-    const id = reserved.has(rawSlug) ? `${rawSlug}-vorlage` : rawSlug
+      .toLowerCase() || 'template'
+    const reserved = new Set(['worksheet', 'rfc', 'generic'])
+    const id = reserved.has(rawSlug) ? `${rawSlug}-template` : rawSlug
 
     const blueprint: GalleyTemplateBlueprint = {
       id,
       title,
       description: opts?.description?.trim() || undefined,
+      ...(packet.locale ? { locale: packet.locale } : {}),
       source: 'workspace',
       sheets: packet.sheetOrder.map((sid) => {
         const sh = packet.sheets[sid]

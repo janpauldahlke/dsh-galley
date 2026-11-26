@@ -373,8 +373,8 @@ test('Download route + path-traversal guard + ctx.galley Cordis service (templat
 test('M2.6 dogfood regressions: table cell shape normalization + insert string dependsOn + patch auto-unstale', async () => {
   const opened = await postJson('/api/galley/edit', {
     op: 'open',
-    template: 'arbeitsblatt',
-    title: 'Dreißigjähriger Krieg',
+    template: 'worksheet',
+    title: 'Thirty Years War',
   })
   assert.equal(opened.status, 200)
 

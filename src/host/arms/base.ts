@@ -33,7 +33,7 @@ export abstract class BaseArm implements Arm {
   protected abstract compileTyp(typ: string, shadows?: ShadowFile[]): CompiledTyp | Promise<CompiledTyp>
 
   async render(sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>): Promise<SheetRender> {
-    const cs = compileSheet(sheet, packet.assets)
+    const cs = compileSheet(sheet, packet.assets, packet.locale)
     const shadows = buildShadows(packet, assetBytes)
     const t0 = process.hrtime.bigint()
     let out: CompiledTyp

@@ -31,12 +31,15 @@
 
 import type {
   Block,
+  GalleyLocale,
   GalleySheet,
   Inline,
   BlockId,
   SheetId,
   LayoutSlot,
+  RenderDiagnostic,
 } from '../shared/types.ts'
+import { getGalleyStrings } from '../shared/i18n.ts'
 
 // ── M0 legacy API (kept so the 11-test baseline + health probe stay green) ──
 
@@ -197,10 +200,10 @@ function anchorRect(i: number): string {
 
 /** Callout tone → fill + left accent. 0.14.2 `rgb()` takes 0–255 ints (or %);
  *  0..1 floats and `#hex` literals are NOT valid in code mode. */
-const CALLOUT_TONES: Record<'info' | 'hint' | 'warning', { fill: string; accent: string; label: string }> = {
-  info: { fill: 'rgb(232, 240, 254)', accent: 'rgb(26, 115, 232)', label: 'Info' },
-  hint: { fill: 'rgb(230, 244, 234)', accent: 'rgb(24, 128, 56)', label: 'Tipp' },
-  warning: { fill: 'rgb(252, 232, 230)', accent: 'rgb(217, 48, 37)', label: 'Achtung' },
+const CALLOUT_TONES: Record<'info' | 'hint' | 'warning', { fill: string; accent: string }> = {
+  info: { fill: 'rgb(232, 240, 254)', accent: 'rgb(26, 115, 232)' },
+  hint: { fill: 'rgb(230, 244, 234)', accent: 'rgb(24, 128, 56)' },
+  warning: { fill: 'rgb(252, 232, 230)', accent: 'rgb(217, 48, 37)' },
 }
 
 /**
@@ -291,21 +294,31 @@ function wrapSlot(block: Block, body: string, assets?: Record<string, unknown>):
  * in the sheet (the anchor color tracks position so a re-render after reorder
  * stays consistent with the `anchors` array).
  */
-export function blockTypst(block: Block, index: number, assets?: Record<string, unknown>, taskNum?: number): string {
+export function blockTypst(
+  block: Block,
+  index: number,
+  assets?: Record<string, unknown>,
+  taskNum?: number,
+  locale?: GalleyLocale,
+): string {
+  const pStr = getGalleyStrings(locale).print
   const lines: string[] = [markerComment(block.id), anchorRect(index)]
   switch (block.type) {
     case 'header': {
-      const f = block.fields ?? {}
+      const f = block.fields ?? ({} as Record<string, string | undefined>)
       const meta: string[] = []
       if (f.fach) meta.push(`#text(size: 9pt, fill: luma(110), ${typString(f.fach)})`)
-      if (f.klasse) meta.push(`#text(size: 9pt, fill: luma(110), ${typString('Klasse: ' + f.klasse)})`)
+      if (f.klasse) {
+        const groupText = f.klasse.includes(':') ? f.klasse : `${pStr.groupPrefix}${f.klasse}`
+        meta.push(`#text(size: 9pt, fill: luma(110), ${typString(groupText)})`)
+      }
       if (f.datum) meta.push(`#text(size: 9pt, fill: luma(110), ${typString(f.datum)})`)
       const right = `[${meta.length ? meta.join('#linebreak()') : ''}]`
-      const left: string[] = [`#text(size: 8pt, fill: luma(110), ${typString('TITEL')})`]
+      const left: string[] = [`#text(size: 8pt, fill: luma(110), ${typString(pStr.headerEyebrow)})`]
       if (f.titel) left.push(`#text(size: 17pt, weight: "bold", ${typString(f.titel)})`)
       if (f.name !== undefined) {
         const nameVal = f.name.trim() ? f.name : '________________________'
-        left.push(`#text(size: 9pt, fill: luma(110), ${typString('Name: ' + nameVal)})`)
+        left.push(`#text(size: 9pt, fill: luma(110), ${typString(pStr.namePrefix + nameVal)})`)
       }
       lines.push(
         `#grid(columns: (1fr, auto), column-gutter: 12pt, align: (top, top))` +
@@ -381,7 +394,7 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       break
     }
     case 'task': {
-      // Avoid double "Aufgabe 1 Aufgabe 1:" when an author/model already wrote the prefix in `body`.
+      // Avoid double prefix ("Task 1 Task 1:" / "Aufgabe 1 Aufgabe 1:") when already written in `body`.
       const firstNode = block.body?.[0]
       const leadingText =
         firstNode?.t === 'text'
@@ -389,10 +402,11 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
           : firstNode?.t === 'strong' && firstNode.c?.[0]?.t === 'text'
             ? firstNode.c[0].v
             : ''
-      if (/^\s*Aufgabe\s+\d+\b/i.test(leadingText)) {
+      if (/^\s*(?:Task|Problem|Question|Exercise|Aufgabe)\s+\d+\b/i.test(leadingText)) {
         lines.push(inlineToContent(block.body))
       } else {
-        lines.push(`#text(weight: "bold", ${typString(taskNum ? 'Aufgabe ' + taskNum : 'Aufgabe')}) ${inlineToContent(block.body)}`)
+        const prefixLabel = taskNum ? `${pStr.taskPrefix} ${taskNum}` : pStr.taskPrefix
+        lines.push(`#text(weight: "bold", ${typString(prefixLabel)}) ${inlineToContent(block.body)}`)
       }
       break
     }
@@ -434,10 +448,12 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       break
     }
     case 'callout': {
-      const t = CALLOUT_TONES[block.tone ?? 'info']
+      const tone = block.tone ?? 'info'
+      const t = CALLOUT_TONES[tone]
+      const toneLabel = pStr.calloutLabels[tone] ?? tone
       lines.push(
         `#block(width: 100%, inset: 8pt, fill: ${t.fill}, stroke: (left: 3pt + ${t.accent}))[`,
-        `#text(size: 8pt, weight: "bold", fill: ${t.accent}, ${typString(t.label)})`,
+        `#text(size: 8pt, weight: "bold", fill: ${t.accent}, ${typString(toneLabel)})`,
         `#linebreak()`,
         inlineToContent(block.body),
         `]`,
@@ -470,21 +486,22 @@ export interface CompileSheetResult {
 }
 
 /** Preamble (0.14.2 surface, spec 03 §3; M1.5 H3.2). */
-function preamble(sheet: GalleySheet): string[] {
+function preamble(sheet: GalleySheet, locale?: GalleyLocale): string[] {
   const g = sheet.geometry
   const m = g.margin
   const isLandscape = g.orientation === 'landscape'
+  const typstLang = getGalleyStrings(locale).print.typstLang
   const L: string[] = []
   L.push(
     `// galley preamble — sheet ${sheet.id} "${sheet.title}" (${g.paper}${isLandscape ? ' landscape' : ''}, margins ${m.top}/${m.right}/${m.bottom}/${m.left} cm)`,
   )
   const flippedArg = isLandscape ? ', flipped: true' : ''
   L.push(`#set page(paper: ${typString(g.paper)}${flippedArg}, margin: (top: ${m.top}cm, bottom: ${m.bottom}cm, left: ${m.left}cm, right: ${m.right}cm))`)
-  L.push(`#set text(size: 10pt, lang: "de")`)
+  L.push(`#set text(size: 10pt, lang: ${typString(typstLang)})`)
   L.push(`#set par(justify: true, leading: 0.75em)`)
   L.push(`#set heading(numbering: none)`)
   // Suppress `#title` when a `header` block carries the title OR block 0 is already
-  // a level-1 `heading` (prevents duplicate "Erwartungshorizont" headings on s2).
+  // a level-1 `heading` (prevents duplicate top-level headings on multi-sheet keys).
   const firstBlk = sheet.blocks[0]
   const hasOwnBanner =
     sheet.blocks.some((b) => b.type === 'header') ||
@@ -496,17 +513,21 @@ function preamble(sheet: GalleySheet): string[] {
 }
 
 /** Deterministic pure function: sheet → `.typ` (spec 03 §4; M1.6). */
-export function compileSheet(sheet: GalleySheet, assets?: Record<string, unknown>): CompileSheetResult {
+export function compileSheet(
+  sheet: GalleySheet,
+  assets?: Record<string, unknown>,
+  locale?: GalleyLocale,
+): CompileSheetResult {
   const rawDim = PAPER_PT[sheet.geometry.paper]
   const isLandscape = sheet.geometry.orientation === 'landscape'
   const pageWidthPt = isLandscape ? rawDim.h : rawDim.w
   const pageHeightPt = isLandscape ? rawDim.w : rawDim.h
-  const lines: string[] = [...preamble(sheet), '']
+  const lines: string[] = [...preamble(sheet, locale), '']
   const anchors: { blockId: BlockId; hex: string }[] = []
   let taskCount = 0
   sheet.blocks.forEach((block, i) => {
     if (block.type === 'task') taskCount += 1
-    lines.push(blockTypst(block, i, assets, block.type === 'task' ? taskCount : undefined))
+    lines.push(blockTypst(block, i, assets, block.type === 'task' ? taskCount : undefined, locale))
     lines.push('')
     anchors.push({ blockId: block.id, hex: anchorHexFor(i) })
   })

@@ -31,7 +31,9 @@ import type {
   ExportFileReceipt,
   GalleyPreflightWarning,
   ReviewMode,
+  GalleyLocale,
 } from '../shared/types.ts'
+import { getGalleyStrings, GALLEY_I18N, DEFAULT_LOCALE } from '../shared/i18n.ts'
 import {
   GalleyStore,
   StoreError,
@@ -68,6 +70,9 @@ export {
   GalleyServiceRegistry,
   defaultGalleyRegistry,
   BUILTIN_TEMPLATES,
+  getGalleyStrings,
+  GALLEY_I18N,
+  DEFAULT_LOCALE,
   getStoreForCwd,
   noteGalleyCwd,
   resolveGalleyCwd,
@@ -437,6 +442,26 @@ function normalizeDependsOn(
   return { deps, error: null }
 }
 
+/** Normalize neutral English header keys (`title`, `subject`/`subtitle`, `group`/`meta`, `date`) alongside canonical keys. */
+export function normalizeHeaderFields(rawFields: unknown): Record<string, string> {
+  if (!rawFields || typeof rawFields !== 'object' || Array.isArray(rawFields)) return { titel: '' }
+  const f = rawFields as Record<string, unknown>
+  const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+  const out: Record<string, string> = {
+    titel: str(f.titel) ?? str(f.title) ?? '',
+  }
+  const fach = str(f.fach) ?? str(f.subject) ?? str(f.subtitle)
+  if (fach !== undefined) out.fach = fach
+  const klasse = str(f.klasse) ?? str(f.group) ?? str(f.meta)
+  if (klasse !== undefined) out.klasse = klasse
+  const datum = str(f.datum) ?? str(f.date)
+  if (datum !== undefined) out.datum = datum
+  if ('name' in f && f.name !== undefined && f.name !== null) {
+    out.name = String(f.name)
+  }
+  return out
+}
+
 /** Build a fully-formed Block from raw input (assigns id, defaults, hash). */
 export function buildBlock(
   packet: GalleyPacket,
@@ -484,7 +509,7 @@ export function buildBlock(
   }
   switch (type) {
     case 'header':
-      base.fields = raw.fields ?? {}
+      base.fields = normalizeHeaderFields(raw.fields)
       break
     case 'heading':
       base.level = (raw.level as 1 | 2 | 3) ?? 1
@@ -639,9 +664,9 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
   const template = args.template ?? 'generic'
   const seedOrigin = args.origin ?? 'human'
   const registry = deps.registry ?? defaultGalleyRegistry
-  const isBuiltin = template === 'arbeitsblatt' || template === 'rfc' || template === 'generic'
-  const customBlueprint = !isBuiltin ? registry.getTemplate(template, store) : null
-  if (!isBuiltin && !customBlueprint) {
+  const isLegacyFastPath = template === 'rfc' || template === 'generic'
+  const customBlueprint = !isLegacyFastPath ? registry.getTemplate(template, store) : null
+  if (!isLegacyFastPath && !customBlueprint) {
     return fail(Err.INVALID_PARAMS, `unknown template '${template}'`)
   }
 
@@ -649,16 +674,15 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
     const id = 'p-' + base32(randomBytes(8), 8)
     const packetTitle =
       args.title ??
-      (customBlueprint
-        ? customBlueprint.title
-        : template === 'arbeitsblatt'
-          ? 'Arbeitsblatt'
-          : 'Document')
+      (customBlueprint ? customBlueprint.title : 'Document')
+    const packetLocale: GalleyLocale | undefined =
+      (args as { locale?: GalleyLocale }).locale ?? customBlueprint?.locale
 
     const packet: GalleyPacket = {
       id,
       template,
       title: packetTitle,
+      ...(packetLocale ? { locale: packetLocale } : {}),
       reviewMode: 'auto',
       rev: 0,
       createdAt: '',
@@ -682,7 +706,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
         packet.sheetOrder.push(sid)
         packet.sheets[sid] = {
           id: sid,
-          title: (idx === 0 && bpSheets.length === 1 && args.title) ? args.title : (bs.title || `Sheet ${idx + 1}`),
+          title: (idx === 0 && args.title) ? args.title : (bs.title || `Sheet ${idx + 1}`),
           geometry: {
             ...JSON.parse(JSON.stringify(bs.geometry)),
             ...(idx === 0 && args.orientation ? { orientation: args.orientation } : {}),
@@ -695,7 +719,12 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
           if (clonedRaw.type === 'header' && args.title && clonedRaw.fields && typeof clonedRaw.fields === 'object') {
             ;(clonedRaw.fields as Record<string, unknown>).titel = args.title
           }
-          const { block, error } = buildBlock(packet, clonedRaw, seedOrigin)
+          // Starter blocks inside built-in/plugin multi-block templates default to agent-editable scaffold
+          const blockOrigin =
+            seedOrigin === 'human' && (customBlueprint.source === 'builtin' || customBlueprint.source === 'plugin')
+              ? 'agent'
+              : seedOrigin
+          const { block, error } = buildBlock(packet, clonedRaw, blockOrigin)
           if (error) return fail(toStoreCode(error), `template starter block: ${error}`)
           packet.sheets[sid].blocks.push(block)
           packet.nextBlockSeq += 1
@@ -710,38 +739,12 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
           paper: 'a4',
           ...(args.orientation ? { orientation: args.orientation } : {}),
           margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
-          targetPages: args.targetPages ?? (template === 'arbeitsblatt' ? 1 : undefined),
+          ...(args.targetPages !== undefined ? { targetPages: args.targetPages } : {}),
         },
         blocks: [],
       }
       packet.sheetOrder = [sheetId]
       packet.sheets[sheetId] = sheet
-
-      if (template === 'arbeitsblatt') {
-        const s2Id: SheetId = 's2'
-        packet.sheets[s2Id] = {
-          id: s2Id,
-          title: 'Erwartungshorizont',
-          geometry: { paper: 'a4', margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 } },
-          blocks: [],
-        }
-        packet.sheetOrder.push(s2Id)
-        const scaffold = (sid: SheetId, raw: Record<string, unknown>): ToolFailure | undefined => {
-          const { block, error } = buildBlock(packet, raw, 'agent')
-          if (error) return fail(toStoreCode(error), `arbeitsblatt scaffold block: ${error}`)
-          packet.sheets[sid].blocks.push(block)
-          packet.nextBlockSeq += 1
-          return undefined
-        }
-        const r1 = scaffold(sheetId, { type: 'header', fields: { titel: packet.title, fach: '', klasse: '', datum: '', name: '' } })
-        if (r1) return r1
-        const r2 = scaffold(sheetId, { type: 'task', body: 'Erste Aufgabe' })
-        if (r2) return r2
-        const r3 = scaffold(s2Id, { type: 'heading', level: 1, body: 'Erwartungshorizont' })
-        if (r3) return r3
-        const r4 = scaffold(s2Id, { type: 'answer', body: 'Lösung', dependsOn: [{ id: 'b2', sinceHash: packet.sheets[sheetId].blocks[1].hash, at: new Date().toISOString() }] })
-        if (r4) return r4
-      }
     }
 
     const firstSheet = packet.sheets[packet.sheetOrder[0]]
@@ -1267,7 +1270,10 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
                 if (wRes.colWidths) b.colWidths = wRes.colWidths
                 else delete b.colWidths
                 contentTouched = true
-              } else if (['fields', 'level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
+              } else if (k === 'fields') {
+                b.fields = normalizeHeaderFields(v)
+                contentTouched = true
+              } else if (['level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
                 b[k] = v
                 contentTouched = true
               }
@@ -1489,11 +1495,11 @@ export async function galleyExport(
 
       switch (args.format) {
         case 'typ':
-          text = compileSheet(sheet, packet.assets).typ
+          text = compileSheet(sheet, packet.assets, packet.locale).typ
           bytes = Buffer.from(text, 'utf8')
           break
         case 'md':
-          text = toMarkdown(sheet)
+          text = toMarkdown(sheet, packet.locale)
           bytes = Buffer.from(text, 'utf8')
           break
         case 'tex':
@@ -1571,18 +1577,20 @@ function mdCell(inlines: Inline[]): string {
     .trim()
 }
 
-function toMarkdown(sheet: GalleySheet): string {
+function toMarkdown(sheet: GalleySheet, locale?: GalleyLocale): string {
+  const pStr = getGalleyStrings(locale).print
+  const isDe = locale === 'de'
   const L: string[] = [`# ${sheet.title}`, '']
   let taskNum = 0
   for (const b of sheet.blocks) {
     if (b.type === 'header') {
       const f = b.fields ?? { titel: '' }
       const meta: string[] = []
-      if (f.fach) meta.push(`Fach: ${f.fach}`)
-      if (f.klasse) meta.push(`Klasse: ${f.klasse}`)
-      if (f.datum) meta.push(`Datum: ${f.datum}`)
+      if (f.fach) meta.push(isDe ? `Fach: ${f.fach}` : f.fach)
+      if (f.klasse) meta.push(f.klasse.includes(':') ? f.klasse : `${pStr.groupPrefix}${f.klasse}`)
+      if (f.datum) meta.push(isDe ? `Datum: ${f.datum}` : f.datum)
       if (f.name !== undefined) {
-        meta.push(f.name ? `Name: ${f.name}` : 'Name: ________________________')
+        meta.push(f.name ? `${pStr.namePrefix}${f.name}` : `${pStr.namePrefix}________________________`)
       }
       L.push(`**${f.titel ?? ''}**${meta.length > 0 ? ` · ${meta.join(' · ')}` : ''}`)
     } else if (b.type === 'heading') {
@@ -1593,8 +1601,8 @@ function toMarkdown(sheet: GalleySheet): string {
     } else if (b.type === 'task') {
       taskNum += 1
       const bodyMd = inlineToMarkdown(b.body)
-      const hasPrefix = /^\*{0,2}\s*Aufgabe\s+\d+\b/i.test(bodyMd)
-      L.push(hasPrefix ? bodyMd : `**Aufgabe ${taskNum}:** ${bodyMd}`)
+      const hasPrefix = /^\*{0,2}\s*(?:Task|Problem|Question|Exercise|Aufgabe)\s+\d+\b/i.test(bodyMd)
+      L.push(hasPrefix ? bodyMd : `**${pStr.taskPrefix} ${taskNum}:** ${bodyMd}`)
     } else if (b.type === 'table') {
       const colCount = Math.max(
         b.headers.length,
