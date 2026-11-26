@@ -25,7 +25,7 @@ import {
   DOWNLOAD_ROUTE,
   PROPOSAL_ROUTE_PREFIX,
 } from '../shared/types.ts'
-import type { GalleyPacket, GalleySheet } from '../shared/types.ts'
+import type { GalleyPacket, GalleySheet, SourceProvenance } from '../shared/types.ts'
 import { renderTypstSource, type GalleyBlock } from '../typst/index.ts'
 import { createPrimaryArm, loadBundledFontBlobs, type Arm } from './arms/index.ts'
 import {
@@ -76,12 +76,15 @@ export {
   scanResumedGalleyState,
   createGalleyUserMessage,
   estimateTokens,
+  setSessionActivePacket,
+  getSessionActivePacket,
 }
 export type {
   GalleyService,
   GalleyDeltaSource,
   GalleyInjectDeps,
   FormatGalleyDeltaInput,
+  SourceProvenance,
 }
 // Arms are re-exported so the in-process gate test (test/05) and the health
 // probe can drive the real render pipeline; `@myriaddreamin/*` stays external
@@ -418,10 +421,18 @@ export function registerGalleyTools(ctx: Context): () => void {
         },
         beforeId: { type: 'string', description: 'insert: place before this block ID (omit `beforeId`/`afterId` to append to sheet end).' },
         afterId: { type: 'string', description: 'insert: place immediately after this block ID.' },
-        block: { type: 'object', additionalProperties: true, description: 'insert: new block object (e.g. `{ type, body, dependsOn: ["b2"] }`).' },
+        block: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'insert: new block object (e.g. `{ type, body, dependsOn: ["b2"], provenance?: { sourceId, quoteSha256?, citation?, locator? } }`).',
+        },
         blockId: { type: 'string', description: 'patch / move / remove: target block ID.' },
         baseHash: { type: 'string', description: 'Optional optimistic-lock hash; checked when supplied.' },
-        patch: { type: 'object', additionalProperties: true, description: 'patch: fields to update (e.g. `{ body, dependsOn: ["b2"], colWidths }`).' },
+        patch: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'patch: fields to update (e.g. `{ body, dependsOn: ["b2"], colWidths, provenance }` — pass `provenance: null` to clear).',
+        },
         toSheetId: { type: 'string', description: 'move: target sheet ID for cross-sheet move.' },
         toBeforeId: { type: 'string', description: 'move: place before this block ID.' },
         toAfterId: { type: 'string', description: 'move: place after this block ID.' },
@@ -480,6 +491,18 @@ export function registerGalleyTools(ctx: Context): () => void {
         blockId: { type: 'string' },
         action: { type: 'string', enum: ['add', 'list', 'resolve', 'unresolve'] },
         body: {},
+        provenance: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Optional source-grounding metadata on `add` (`{ sourceId, quoteSha256?, citation?, locator? }`).',
+          properties: {
+            sourceId: { type: 'string' },
+            quoteSha256: { type: 'string' },
+            citation: { type: 'string' },
+            locator: { type: 'string' },
+          },
+          required: ['sourceId'],
+        },
         annotationId: { type: 'string' },
       },
       required: ['blockId', 'action'],

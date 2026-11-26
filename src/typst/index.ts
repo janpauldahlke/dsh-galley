@@ -394,6 +394,12 @@ export function blockTypst(
         }
         lines.push(out)
       }
+      if (block.provenance?.citation) {
+        const attr = block.provenance.locator
+          ? `${block.provenance.citation}, ${block.provenance.locator}`
+          : block.provenance.citation
+        lines.push('', `#emph[#text(size: 8.5pt, fill: luma(100), ${typString('— ' + attr)})]`)
+      }
       break
     }
     case 'task': {

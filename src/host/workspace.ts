@@ -1,13 +1,12 @@
 /**
- * Pane <-> tools workspace cwd bridge (proven sibling pattern from dsh-web-missions).
+ * Pane <-> tools workspace cwd & session-packet bridge (M2.7 + M4.2b).
  *
  * Tools resolve the galley store root from an explicit `cwd` arg or the agent
  * session header (`exec.agent.session.header.cwd`), recording the active cwd.
- * HTTP pane routes adopt `?cwd=` or `body.cwd` from the active chat session,
- * falling back to the last noted cwd or `process.cwd()`.
- *
- * When `process.env.GALLEY_ROOT` is set, it overrides directory resolution so
- * isolated tests and custom store locations work deterministically.
+ * HTTP pane routes adopt `?cwd=` / `body.cwd` and `?sessionId=` / `body.sessionId`
+ * from the active chat session, persisting `(root, sessionId) -> packetId`
+ * atomically in `<root>/sessions.json` so concurrent sessions in one workspace
+ * never clobber each other across edits, polls, or host restarts.
  */
 import { join } from 'node:path'
 import { GalleyStore } from './store.ts'
@@ -15,7 +14,6 @@ import { GalleyStore } from './store.ts'
 interface WorkspaceSingletonState {
   lastGalleyCwd: string | null
   storesByRoot: Map<string, GalleyStore>
-  sessionActivePackets: Map<string, string>
 }
 
 const WORKSPACE_SYM = Symbol.for('dsh-galley.workspace.v1')
@@ -24,16 +22,19 @@ if (!g[WORKSPACE_SYM]) {
   g[WORKSPACE_SYM] = {
     lastGalleyCwd: null,
     storesByRoot: new Map<string, GalleyStore>(),
-    sessionActivePackets: new Map<string, string>(),
   }
 }
 const wsState = g[WORKSPACE_SYM]!
 const storesByRoot = wsState.storesByRoot
-/**
- * Per-(root, sessionId) sticky active packet so human pane browsing never
- * hijacks an in-flight agent session's un-anchored tool calls (M2.7).
- */
-const sessionActivePackets = wsState.sessionActivePackets
+
+function getOrCreateStoreByRoot(root: string): GalleyStore {
+  let store = storesByRoot.get(root)
+  if (!store) {
+    store = new GalleyStore(root)
+    storesByRoot.set(root, store)
+  }
+  return store
+}
 
 export function setSessionActivePacket(
   root: string,
@@ -41,8 +42,9 @@ export function setSessionActivePacket(
   packetId: string,
 ): void {
   const sid = sessionId?.trim()
-  if (sid && packetId) {
-    sessionActivePackets.set(`${root}::${sid}`, packetId)
+  const pid = packetId?.trim()
+  if (sid && pid && root) {
+    getOrCreateStoreByRoot(root).setSessionPacket(sid, pid)
   }
 }
 
@@ -51,13 +53,16 @@ export function getSessionActivePacket(
   sessionId: string | null | undefined,
 ): string | null {
   const sid = sessionId?.trim()
-  if (!sid) return null
-  return sessionActivePackets.get(`${root}::${sid}`) ?? null
+  if (!sid || !root) return null
+  return getOrCreateStoreByRoot(root).getSessionPacket(sid)
 }
 
-export function clearSessionActivePacket(packetId: string): void {
-  for (const [k, v] of sessionActivePackets.entries()) {
-    if (v === packetId) sessionActivePackets.delete(k)
+export function clearSessionActivePacket(packetId: string, root?: string): void {
+  if (root) {
+    getOrCreateStoreByRoot(root).pruneSessionPackets(packetId)
+  }
+  for (const store of storesByRoot.values()) {
+    store.pruneSessionPackets(packetId)
   }
 }
 
@@ -93,16 +98,11 @@ export function resolveGalleyRoot(cwd?: string | null): string {
 export function getStoreForCwd(cwd?: string | null): { store: GalleyStore; root: string; cwd: string } {
   const resolvedCwd = resolveGalleyCwd(cwd)
   const root = process.env.GALLEY_ROOT ?? join(resolvedCwd, '.dsh', 'galley')
-  let store = storesByRoot.get(root)
-  if (!store) {
-    store = new GalleyStore(root)
-    storesByRoot.set(root, store)
-  }
+  const store = getOrCreateStoreByRoot(root)
   return { store, root, cwd: resolvedCwd }
 }
 
 export function _resetGalleyWorkspaceForTests(): void {
   wsState.lastGalleyCwd = null
   storesByRoot.clear()
-  sessionActivePackets.clear()
 }

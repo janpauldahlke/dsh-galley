@@ -34,8 +34,10 @@ import type {
   GalleySheet,
   Block,
   BlockId,
+  PacketId,
   SheetId,
   StaleInfo,
+  SourceProvenance,
   DepEdge,
   AssetMeta,
   GalleyProposal,
@@ -82,6 +84,35 @@ export function hashContent(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex')
 }
 
+/**
+ * Validate and normalize an optional `SourceProvenance` input:
+ * - `undefined` -> `{ provenance: undefined, error: null }` (untouched)
+ * - `null`      -> `{ provenance: null, error: null }` (clear on patch)
+ * - `object`    -> requires non-empty trimmed `sourceId`; trims optional strings.
+ */
+export function validateProvenance(
+  raw: unknown,
+): { provenance: SourceProvenance | null | undefined; error: string | null } {
+  if (raw === undefined) return { provenance: undefined, error: null }
+  if (raw === null) return { provenance: null, error: null }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { provenance: undefined, error: 'invalid_op' }
+  }
+  const obj = raw as Record<string, unknown>
+  if (typeof obj.sourceId !== 'string' || obj.sourceId.trim().length === 0) {
+    return { provenance: undefined, error: 'invalid_op' }
+  }
+  const out: SourceProvenance = { sourceId: obj.sourceId.trim() }
+  for (const key of ['quoteSha256', 'citation', 'locator'] as const) {
+    const val = obj[key]
+    if (val === undefined || val === null || val === '') continue
+    if (typeof val !== 'string') return { provenance: undefined, error: 'invalid_op' }
+    const trimmed = val.trim()
+    if (trimmed.length > 0) out[key] = trimmed
+  }
+  return { provenance: out, error: null }
+}
+
 /** The content projection of a block: content + structural fields ONLY (spec 01 §5: excludes id, hash, stale, origin, updatedAt). */
 export function blockContentProjection(block: Block): Record<string, unknown> {
   const b = block as unknown as Record<string, unknown>
@@ -100,6 +131,7 @@ export function blockContentProjection(block: Block): Record<string, unknown> {
   if (b.tone !== undefined) out.tone = b.tone
   if (b.title !== undefined) out.title = b.title
   if (b.lineNumbers !== undefined) out.lineNumbers = b.lineNumbers
+  if (b.provenance !== undefined) out.provenance = b.provenance
   return out
 }
 
@@ -190,7 +222,7 @@ export interface CommitResult {
 }
 
 export class GalleyStore {
-  private readonly root: string
+  readonly root: string
 
   /** @param root default `<cwd>/.dsh/galley`. Pass a temp dir for hermetic tests. */
   constructor(root?: string) {
@@ -283,6 +315,7 @@ export class GalleyStore {
       else this.clearActivePacket()
     }
     rmSync(dir, { recursive: true, force: true })
+    this.pruneSessionPackets(id)
   }
 
   renamePacket(id: string, title: string, actor: 'human' | 'agent' = 'human'): GalleyPacket {
@@ -600,6 +633,63 @@ export class GalleyStore {
     }
   }
 
+  // ── per-session active packet bindings (<root>/sessions.json, M4.2b) ──────
+
+  private sessionsPath(): string {
+    return join(this.root, 'sessions.json')
+  }
+
+  private readSessionMap(): Record<string, PacketId> {
+    const raw = this.readJson<Record<string, unknown> | null>(this.sessionsPath(), null)
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const out: Record<string, PacketId> = {}
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === 'string' && k.trim() && v.trim()) {
+        out[k] = v
+      }
+    }
+    return out
+  }
+
+  setSessionPacket(sessionId: string, packetId: PacketId): void {
+    const sid = sessionId.trim()
+    const pid = packetId.trim()
+    if (!sid || !pid) return
+    const map = this.readSessionMap()
+    if (map[sid] === pid) return
+    map[sid] = pid
+    this.atomicWrite(this.sessionsPath(), JSON.stringify(map, null, 2))
+  }
+
+  getSessionPacket(sessionId: string): PacketId | null {
+    const sid = sessionId.trim()
+    if (!sid) return null
+    const map = this.readSessionMap()
+    const pid = map[sid]
+    if (!pid) return null
+    if (!existsSync(this.packetPath(pid))) {
+      delete map[sid]
+      this.atomicWrite(this.sessionsPath(), JSON.stringify(map, null, 2))
+      return null
+    }
+    return pid
+  }
+
+  pruneSessionPackets(deletedPacketId: PacketId): void {
+    if (!existsSync(this.sessionsPath())) return
+    const map = this.readSessionMap()
+    let changed = false
+    for (const [sid, pid] of Object.entries(map)) {
+      if (pid === deletedPacketId) {
+        delete map[sid]
+        changed = true
+      }
+    }
+    if (changed) {
+      this.atomicWrite(this.sessionsPath(), JSON.stringify(map, null, 2))
+    }
+  }
+
   /**
    * The single commit path (spec 01 §4). `expect`, when given, must match the
    * current content hash of that block or the commit throws `conflict` (409).
@@ -843,6 +933,11 @@ export class GalleyStore {
       for (const [k, v] of Object.entries(proposal.proposedPatch)) {
         if (k === 'body') {
           b.body = typeof v === 'string' ? parseInlines(v) : Array.isArray(v) ? v : parseInlines(String(v))
+        } else if (k === 'provenance') {
+          const provRes = validateProvenance(v)
+          if (provRes.error) throw new StoreError(provRes.error, 'invalid provenance')
+          if (provRes.provenance === null) delete b.provenance
+          else if (provRes.provenance !== undefined) b.provenance = provRes.provenance
         } else if (k !== 'origin' && k !== 'id' && k !== 'hash') {
           b[k] = v
         }
@@ -888,11 +983,20 @@ export class GalleyStore {
     return { accepted, conflicted, rev: this.load(id)!.rev }
   }
   addAnnotation(id: string, annotation: GalleyAnnotation): GalleyAnnotation {
+    if (!this.load(id)) throw new StoreError('not_found', `packet ${id} not found`)
+    let normalized = annotation
+    if (annotation.provenance !== undefined) {
+      const provRes = validateProvenance(annotation.provenance)
+      if (provRes.error || provRes.provenance === null) {
+        throw new StoreError('invalid_op', 'invalid annotation provenance')
+      }
+      normalized = { ...annotation, provenance: provRes.provenance }
+    }
     const list = this.readJson<GalleyAnnotation[]>(join(this.dir(id), 'annotations.json'), [])
-    list.push(annotation)
+    list.push(normalized)
     this.atomicWrite(join(this.dir(id), 'annotations.json'), JSON.stringify(list))
-    this.bumpRev(id, `annotation ${annotation.id} on ${annotation.blockId} (${annotation.author})`, annotation.author)
-    return annotation
+    this.bumpRev(id, `annotation ${normalized.id} on ${normalized.blockId} (${normalized.author})`, normalized.author)
+    return normalized
   }
   listAnnotations(id: string, blockId?: BlockId): GalleyAnnotation[] {
     const list = this.readJson<GalleyAnnotation[]>(join(this.dir(id), 'annotations.json'), [])

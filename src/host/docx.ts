@@ -748,6 +748,14 @@ function renderBlockCoreXml(ctx: SheetBuildContext, block: Block, availTwips: nu
         )
       }
       parts.push(`<w:p>${inlineToOoxml(block.body)}</w:p>`)
+      if (block.provenance?.citation) {
+        const attr = block.provenance.locator
+          ? `${block.provenance.citation}, ${block.provenance.locator}`
+          : block.provenance.citation
+        parts.push(
+          `<w:p><w:pPr><w:spacing w:before="20" w:after="80"/></w:pPr>${renderTextRun(`— ${attr}`, { italic: true, colorHex: '666666', sizeHalfPt: 17 })}</w:p>`,
+        )
+      }
       return parts.join('')
     }
 

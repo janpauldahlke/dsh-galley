@@ -28,7 +28,7 @@ All tests use Node's built-in runner (`node --test`) with zero external test fra
 
 ## Extending `dsh-galley` via `ctx.galley`
 
-Companion Cordis plugins can register templates and preflight checks with automatic disposal:
+Companion Cordis plugins can register templates, attach source-grounding preflight checks (inspecting `block.provenance` / `annotation.provenance`), and read or bind per-session active packets (`getSessionPacketId`, `setSessionPacketId`) with automatic disposal:
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'

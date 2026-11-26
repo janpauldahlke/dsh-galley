@@ -22,6 +22,7 @@ import {
   type LayoutSlot,
   type ReviewMode,
   type SheetId,
+  type SourceProvenance,
   type StateActivePayload,
   type StateEmptyPayload,
   type StateProofView,
@@ -44,8 +45,10 @@ import {
 } from './tools.ts'
 import {
   clearSessionActivePacket,
+  getSessionActivePacket,
   getStoreForCwd,
   noteGalleyCwd,
+  setSessionActivePacket,
 } from './workspace.ts'
 
 const BODY_LIMIT_BYTES = 6 * 1024 * 1024 // 6 MB JSON envelope (allows ≤4 MB raw image asset in base64)
@@ -149,6 +152,27 @@ function readJsonBody(req: IncomingMessage, limit = BODY_LIMIT_BYTES): Promise<R
 function parseUrl(req: IncomingMessage): URL {
   const host = req.headers.host ?? '127.0.0.1'
   return new URL(req.url ?? '/', `http://${host}`)
+}
+
+function extractSessionId(url: URL, body?: Record<string, unknown>): string | null {
+  const fromBody = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+  if (fromBody) return fromBody
+  const fromQuery = url.searchParams.get('sessionId')?.trim() ?? ''
+  return fromQuery || null
+}
+
+function resolveHttpPacketId(
+  root: string,
+  store: { getActivePacket(): string | null },
+  explicitPid: string | undefined,
+  sessionId: string | null,
+): string | null {
+  if (explicitPid !== undefined) return explicitPid
+  if (sessionId) {
+    const pinned = getSessionActivePacket(root, sessionId)
+    if (pinned) return pinned
+  }
+  return store.getActivePacket()
 }
 
 function extForMime(mimeType: string): string {
@@ -282,7 +306,8 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       return
     }
 
-    const activePid = explicitPid ?? store.getActivePacket()
+    const sessionId = extractSessionId(url)
+    const activePid = resolveHttpPacketId(root, store, explicitPid, sessionId)
     const packet = activePid ? store.load(activePid) : null
     const templates = registry.listTemplates(store)
     if (!packet) {
@@ -386,22 +411,24 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
     const cwdParam = (typeof body.cwd === 'string' ? body.cwd : url.searchParams.get('cwd'))?.trim() || null
     if (cwdParam) noteGalleyCwd(cwdParam)
-    const { deps } = await hostDeps.getDepsForCwd(cwdParam)
+    const { deps, root } = await hostDeps.getDepsForCwd(cwdParam)
     const { store } = deps
+    const sessionId = extractSessionId(url, body)
 
     const op = typeof body.op === 'string' ? body.op : ''
     const source: 'human' | 'agent' = body.source === 'agent' || body.origin === 'agent' ? 'agent' : 'human'
     const packetIdArg = typeof body.packetId === 'string' ? body.packetId : undefined
 
     try {
-      // 1. Route-only op: open / switch Mappe
-      if (op === 'open') {
+      // 1. Route-only op: open / switch Mappe (`open` or `packet-open`)
+      if (op === 'open' || op === 'packet-open') {
         const result = await galleyOpen(
           { ...deps, registry },
           {
             id: typeof body.id === 'string' ? body.id : undefined,
             template: typeof body.template === 'string' ? body.template : undefined,
             title: typeof body.title === 'string' ? body.title : undefined,
+            locale: body.locale === 'de' ? 'de' : body.locale === 'en' ? 'en' : undefined,
             orientation: body.orientation === 'landscape' ? 'landscape' : body.orientation === 'portrait' ? 'portrait' : undefined,
             targetPages: typeof body.targetPages === 'number' ? body.targetPages : undefined,
             blocks: Array.isArray(body.blocks) ? (body.blocks as Record<string, unknown>[]) : undefined,
@@ -411,6 +438,9 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         if (!result.ok) {
           sendFailure(res, result)
           return
+        }
+        if (sessionId) {
+          setSessionActivePacket(root, sessionId, result.packetId)
         }
         sendJson(res, 200, result)
         return
@@ -430,24 +460,24 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
       // 1c. Route-only op: packet-delete (may delete any packet id or active packet)
       if (op === 'packet-delete') {
-        const targetId = packetIdArg ?? store.getActivePacket()
+        const targetId = resolveHttpPacketId(root, store, packetIdArg, sessionId)
         if (!targetId) {
           sendFailure(res, { ok: false, code: Err.NO_ACTIVE_PACKET, message: 'no packet to delete' })
           return
         }
         store.delete(targetId)
-        clearSessionActivePacket(targetId)
+        clearSessionActivePacket(targetId, root)
         sendJson(res, 200, {
           ok: true,
           deletedId: targetId,
-          activePacketId: store.getActivePacket(),
+          activePacketId: resolveHttpPacketId(root, store, undefined, sessionId),
           packets: store.list(),
         })
         return
       }
 
       // Resolve active packet for all other ops
-      const pid = packetIdArg ?? store.getActivePacket()
+      const pid = resolveHttpPacketId(root, store, packetIdArg, sessionId)
       if (!pid) {
         sendFailure(res, { ok: false, code: Err.NO_ACTIVE_PACKET, message: 'no active packet' })
         return
@@ -466,6 +496,9 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       }
       if (op === 'packet-duplicate') {
         const dup = store.duplicatePacket(pid, typeof body.title === 'string' ? body.title : undefined)
+        if (sessionId) {
+          setSessionActivePacket(root, sessionId, dup.id)
+        }
         sendJson(res, 200, { ok: true, packetId: dup.id, rev: dup.rev, title: dup.title })
         return
       }
@@ -536,6 +569,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
           action,
           author: source,
           body: (body.body as string | undefined) ?? '',
+          ...(body.provenance !== undefined ? { provenance: body.provenance as SourceProvenance } : {}),
           annotationId: typeof body.annotationId === 'string' ? body.annotationId : undefined,
         })
         if (!annRes.ok) {
@@ -695,6 +729,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
           }
           if (body.slot !== undefined) patchObj.slot = body.slot
           if (body.dependsOn !== undefined) patchObj.dependsOn = body.dependsOn
+          if (body.provenance !== undefined) patchObj.provenance = body.provenance
         }
 
         const result = await galleyEditBlock(deps, {
@@ -749,7 +784,13 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     const { deps, root } = await hostDeps.getDepsForCwd(cwdParam)
     const { store } = deps
 
-    const pid = (typeof body.packetId === 'string' ? body.packetId : undefined) ?? store.getActivePacket()
+    const sessionId = extractSessionId(url, body)
+    const pid = resolveHttpPacketId(
+      root,
+      store,
+      typeof body.packetId === 'string' ? body.packetId : undefined,
+      sessionId,
+    )
     if (!pid) {
       sendFailure(res, { ok: false, code: Err.NO_ACTIVE_PACKET, message: 'no active packet' })
       return
@@ -832,7 +873,8 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
     const cwdParam = (typeof body.cwd === 'string' ? body.cwd : url.searchParams.get('cwd'))?.trim() || null
     if (cwdParam) noteGalleyCwd(cwdParam)
-    const { deps, cwd } = await hostDeps.getDepsForCwd(cwdParam)
+    const { deps, root, cwd } = await hostDeps.getDepsForCwd(cwdParam)
+    const sessionId = extractSessionId(url, body)
 
     const format = typeof body.format === 'string' ? (body.format as 'pdf' | 'docx' | 'typ' | 'tex' | 'md') : 'pdf'
     const sheetIds =
@@ -840,10 +882,11 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         ? (body.sheetIds.filter((s): s is string => typeof s === 'string') as SheetId[])
         : undefined
     const sheetId = typeof body.sheetId === 'string' ? body.sheetId : undefined
-    const packetId = typeof body.packetId === 'string' ? body.packetId : undefined
+    const explicitPacketId = typeof body.packetId === 'string' ? body.packetId : undefined
+    const resolvedPacketId = resolveHttpPacketId(root, deps.store, explicitPacketId, sessionId) ?? undefined
 
     const result = await galleyExport(deps, {
-      packetId,
+      packetId: resolvedPacketId,
       sheetId,
       sheetIds,
       format,
@@ -855,7 +898,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     }
     sendJson(res, 200, {
       ok: true,
-      packetId: packetId ?? deps.store.getActivePacket(),
+      packetId: resolvedPacketId ?? deps.store.getActivePacket(),
       format: result.format,
       files: result.files ?? [],
     })

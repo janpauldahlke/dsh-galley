@@ -10,11 +10,12 @@ import type {
   GalleyPacket,
   GalleyPreflightWarning,
   GalleyTemplateBlueprint,
+  PacketId,
   SheetId,
 } from '../shared/types.ts'
 import { getGalleyStrings } from '../shared/i18n.ts'
-import type { GalleyStore } from './store.ts'
-import { getStoreForCwd } from './workspace.ts'
+import { StoreError, type GalleyStore } from './store.ts'
+import { getSessionActivePacket, getStoreForCwd, setSessionActivePacket } from './workspace.ts'
 
 export const BUILTIN_TEMPLATES: GalleyTemplateBlueprint[] = [
   {
@@ -97,6 +98,8 @@ export interface GalleyService {
   listTemplates(cwd?: string): GalleyTemplateBlueprint[]
   registerPreflight(id: string, check: GalleyPreflightCheckFn): () => void
   getStore(cwd?: string): GalleyStore
+  getSessionPacketId(cwd: string | undefined, sessionId: string): PacketId | null
+  setSessionPacketId(cwd: string | undefined, sessionId: string, packetId: PacketId): void
 }
 
 export class GalleyServiceRegistry {
@@ -286,6 +289,17 @@ export class GalleyServiceRegistry {
       },
       registerPreflight: (id, check) => this.registerPreflight(id, check),
       getStore: (cwd) => getStoreForCwd(cwd).store,
+      getSessionPacketId: (cwd, sessionId) => {
+        const { root } = getStoreForCwd(cwd)
+        return getSessionActivePacket(root, sessionId)
+      },
+      setSessionPacketId: (cwd, sessionId, packetId) => {
+        const { store, root } = getStoreForCwd(cwd)
+        if (!store.load(packetId)) {
+          throw new StoreError('not_found', `packet ${packetId} not found`)
+        }
+        setSessionActivePacket(root, sessionId, packetId)
+      },
     }
   }
 

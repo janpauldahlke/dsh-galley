@@ -80,9 +80,10 @@ export function GalleyBody(props: {
   useSessions?: UseSessions
 } = {}): ReactNode {
   const { sessionId, useSessions = useNoopSessions } = props
+  const cleanSessionId = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null
   const sessionCwd = useSessions((sessions) => {
-    if (!sessionId) return null
-    const cwd = sessions.byId[sessionId]?.cwd
+    if (!cleanSessionId) return null
+    const cwd = sessions.byId[cleanSessionId]?.cwd
     return typeof cwd === 'string' && cwd.trim() ? cwd.trim() : null
   })
 
@@ -119,7 +120,7 @@ export function GalleyBody(props: {
   useEffect(() => {
     localRevRef.current = null
     localPacketIdRef.current = null
-  }, [sessionCwd])
+  }, [sessionCwd, cleanSessionId])
 
   // Track container width for auto wide/narrow split (480 px threshold, Spec 04 §3)
   useEffect(() => {
@@ -137,7 +138,7 @@ export function GalleyBody(props: {
 
   const pollOnce = useCallback(async (forceFull = false): Promise<{ hadError: boolean; revAdvanced: boolean }> => {
     try {
-      let url = withCwdQuery(STATE_ROUTE, sessionCwd)
+      let url = withCwdQuery(STATE_ROUTE, sessionCwd, cleanSessionId)
       const knownRev = forceFull ? null : localRevRef.current
       const knownPid = forceFull ? null : localPacketIdRef.current
       if (knownRev !== null && knownRev > 0) {
@@ -169,7 +170,7 @@ export function GalleyBody(props: {
       setReconnecting(true)
       return { hadError: true, revAdvanced: false }
     }
-  }, [sessionCwd])
+  }, [sessionCwd, cleanSessionId])
 
   // Initial health check + resilient polling loop (Spec 04 §2)
   useEffect(() => {
@@ -249,11 +250,15 @@ export function GalleyBody(props: {
       setBusy(true)
       setActionError(null)
       try {
-        const payloadWithCwd = sessionCwd ? { ...body, cwd: sessionCwd } : body
-        const res = await fetch(withCwdQuery(path, sessionCwd), {
+        const payloadWithCtx: Record<string, unknown> = {
+          ...body,
+          ...(sessionCwd ? { cwd: sessionCwd } : {}),
+          ...(cleanSessionId ? { sessionId: cleanSessionId } : {}),
+        }
+        const res = await fetch(withCwdQuery(path, sessionCwd, cleanSessionId), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payloadWithCwd),
+          body: JSON.stringify(payloadWithCtx),
         })
         const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
         if (!res.ok || data.ok === false) {
@@ -275,7 +280,7 @@ export function GalleyBody(props: {
         setBusy(false)
       }
     },
-    [pollOnce, sessionCwd],
+    [pollOnce, sessionCwd, cleanSessionId],
   )
 
   const postJson = useCallback(

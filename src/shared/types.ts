@@ -71,6 +71,17 @@ export interface StaleInfo {
   sinceHash: string
 }
 
+/**
+ * Typed source-grounding metadata slot for companion verifiers (e.g. `dsh-fundus`
+ * quote drift checks via `ctx.galley.registerPreflight`).
+ */
+export interface SourceProvenance {
+  sourceId: string
+  quoteSha256?: string
+  citation?: string
+  locator?: string
+}
+
 /** Frozen inline rich-text subset (spec 01 §2). Max depth 3, ≤5 000 nodes. */
 export type Inline =
   | { t: 'text'; v: string }
@@ -98,6 +109,8 @@ interface BlockBase {
   hash: string
   dependsOn: DepEdge[]
   slot: LayoutSlot
+  /** Optional archive/mission quote provenance (included in content hash when set). */
+  provenance?: SourceProvenance
   origin: 'human' | 'agent'
   updatedAt: string
   /** derived, recomputed on read (§6); never persisted as input. */
@@ -313,6 +326,7 @@ export interface GalleyAnnotation {
   blockId: BlockId
   author: 'human' | 'agent'
   body: Inline[]
+  provenance?: SourceProvenance
   resolved: boolean
   createdAtRev: number
 }

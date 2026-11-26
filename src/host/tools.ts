@@ -32,6 +32,7 @@ import type {
   GalleyPreflightWarning,
   ReviewMode,
   GalleyLocale,
+  SourceProvenance,
 } from '../shared/types.ts'
 import { getGalleyStrings, GALLEY_I18N, DEFAULT_LOCALE } from '../shared/i18n.ts'
 import {
@@ -40,6 +41,7 @@ import {
   findBlock,
   allocateBlockId,
   hashBlock,
+  validateProvenance,
 } from './store.ts'
 import { compileSheet, splitSvgPages } from '../typst/index.ts'
 import { serializeInlines, parseInlines } from '../shared/inlineMarkup.ts'
@@ -72,6 +74,7 @@ export {
   unpackDocxEntries,
   probeImageDimensions,
   splitInlinesTwoColumn,
+  validateProvenance,
   splitSvgPages,
   serializeInlines,
   parseInlines,
@@ -453,6 +456,8 @@ function normalizeDependsOn(
   return { deps, error: null }
 }
 
+export type { SourceProvenance }
+
 const KNOWN_HEADER_KEYS = new Set([
   'titel',
   'title',
@@ -531,6 +536,9 @@ export function buildBlock(
   const normDeps = normalizeDependsOn(packet, raw.dependsOn, now)
   if (normDeps.error) return { block: null as unknown as Block, error: normDeps.error }
 
+  const normProv = validateProvenance(raw.provenance)
+  if (normProv.error) return { block: null as unknown as Block, error: normProv.error }
+
   const id = (raw.id as BlockId) || allocateBlockId(packet)
   const base: Record<string, unknown> = {
     id,
@@ -538,6 +546,7 @@ export function buildBlock(
     hash: '',
     dependsOn: normDeps.deps,
     slot,
+    ...(normProv.provenance ? { provenance: normProv.provenance } : {}),
     origin,
     updatedAt: now,
     stale: null,
@@ -654,6 +663,7 @@ export interface OpenArgs {
   id?: string
   template?: string
   title?: string
+  locale?: GalleyLocale
   orientation?: 'portrait' | 'landscape'
   blocks?: Record<string, unknown>[]
   targetPages?: number
@@ -1153,7 +1163,12 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
         }
 
         if (args.op === 'patch') {
-          const proposedPatch = args.patch ?? {}
+          const proposedPatch = { ...(args.patch ?? {}) }
+          if ('provenance' in proposedPatch) {
+            const pRes = validateProvenance(proposedPatch.provenance)
+            if (pRes.error) return fail(toStoreCode(pRes.error), 'invalid provenance')
+            proposedPatch.provenance = pRes.provenance
+          }
           const beforePatch: Record<string, unknown> = {}
           const rawBlock = target.block as unknown as Record<string, unknown>
           for (const k of Object.keys(proposedPatch)) {
@@ -1308,6 +1323,12 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
               } else if (k === 'fields') {
                 b.fields = normalizeHeaderFields(v)
                 contentTouched = true
+              } else if (k === 'provenance') {
+                const provRes = validateProvenance(v)
+                if (provRes.error) throw new StoreError(provRes.error, 'invalid provenance')
+                if (provRes.provenance === null) delete b.provenance
+                else if (provRes.provenance !== undefined) b.provenance = provRes.provenance
+                contentTouched = true
               } else if (['level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
                 b[k] = v
                 contentTouched = true
@@ -1419,6 +1440,7 @@ export interface AnnotateArgs {
   action: 'add' | 'list' | 'resolve' | 'unresolve'
   author?: 'human' | 'agent'
   body?: Inline[] | string
+  provenance?: SourceProvenance
   annotationId?: string
 }
 
@@ -1430,17 +1452,26 @@ export async function galleyAnnotate(deps: GalleyToolsDeps, args: AnnotateArgs):
   if (!findBlock(packet, args.blockId)) return fail(Err.BLOCK_NOT_FOUND, `block ${args.blockId} not found`)
   switch (args.action) {
     case 'add': {
+      let prov: SourceProvenance | undefined
+      if (args.provenance !== undefined) {
+        const provRes = validateProvenance(args.provenance)
+        if (provRes.error || provRes.provenance === null) {
+          return fail(Err.INVALID_PARAMS, 'invalid provenance (sourceId required)')
+        }
+        prov = provRes.provenance
+      }
       const body = toInline(args.body ?? '')
       const annotation: GalleyAnnotation = {
         id: `ann-${store.listAnnotations(pid).length + 1}`,
         blockId: args.blockId,
         author: args.author ?? 'human',
         body,
+        ...(prov ? { provenance: prov } : {}),
         resolved: false,
         createdAtRev: packet.rev,
       }
-      store.addAnnotation(pid, annotation)
-      return { ok: true, annotations: store.listAnnotations(pid, args.blockId), created: annotation }
+      const saved = store.addAnnotation(pid, annotation)
+      return { ok: true, annotations: store.listAnnotations(pid, args.blockId), created: saved }
     }
     case 'list':
       return { ok: true, annotations: store.listAnnotations(pid, args.blockId), created: null }
@@ -1636,6 +1667,12 @@ function toMarkdown(sheet: GalleySheet, locale?: GalleyLocale): string {
     } else if (b.type === 'source_text') {
       if (b.title) L.push(`### ${b.title}`)
       L.push(inlineToMarkdown(b.body))
+      if (b.provenance?.citation) {
+        const attr = b.provenance.locator
+          ? `${b.provenance.citation}, ${b.provenance.locator}`
+          : b.provenance.citation
+        L.push(`*— ${attr}*`)
+      }
     } else if (b.type === 'task') {
       taskNum += 1
       const bodyMd = inlineToMarkdown(b.body)

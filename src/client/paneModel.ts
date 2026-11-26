@@ -46,11 +46,19 @@ export function nextPollDelayMs(opts: {
   return POLL_IDLE_MS
 }
 
-export function withCwdQuery(path: string, cwd: string | null | undefined): string {
-  const trimmed = cwd?.trim()
-  if (!trimmed) return path
+export function withCwdQuery(
+  path: string,
+  cwd: string | null | undefined,
+  sessionId?: string | null,
+): string {
+  const params: string[] = []
+  const trimmedCwd = cwd?.trim()
+  if (trimmedCwd) params.push(`cwd=${encodeURIComponent(trimmedCwd)}`)
+  const trimmedSid = sessionId?.trim()
+  if (trimmedSid) params.push(`sessionId=${encodeURIComponent(trimmedSid)}`)
+  if (params.length === 0) return path
   const sep = path.includes('?') ? '&' : '?'
-  return `${path}${sep}cwd=${encodeURIComponent(trimmed)}`
+  return `${path}${sep}${params.join('&')}`
 }
 
 export function shortCwdLabel(cwd: string): string {
