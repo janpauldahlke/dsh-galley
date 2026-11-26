@@ -234,8 +234,16 @@ export interface AssetMeta {
   heightPx?: number
 }
 
+export interface GalleyJournalEntry {
+  rev: number
+  at: string
+  actor?: 'human' | 'agent'
+  note: string
+}
+
 /** A committed proof receipt for one sheet (typed per spec 02 §2 / spec 03 §7). */
 export interface SheetProofReceipt {
+  sheetId?: SheetId
   pages: number
   perPage: { wPt: number; hPt: number }[]
   lastPageLineCount: number

@@ -460,7 +460,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
       // 2. Route-only Mappe CRUD & Review Mode ops
       if (op === 'packet-rename') {
-        const updated = store.renamePacket(pid, typeof body.title === 'string' ? body.title : '')
+        const updated = store.renamePacket(pid, typeof body.title === 'string' ? body.title : '', source)
         sendJson(res, 200, { ok: true, packetId: pid, rev: updated.rev, title: updated.title })
         return
       }
@@ -471,7 +471,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       }
       if (op === 'packet-set-review-mode') {
         const mode = body.reviewMode as ReviewMode
-        const updated = store.setReviewMode(pid, mode)
+        const updated = store.setReviewMode(pid, mode, source)
         sendJson(res, 200, { ok: true, packetId: pid, rev: updated.rev, reviewMode: updated.reviewMode ?? 'auto' })
         return
       }
@@ -485,24 +485,25 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         return
       }
 
-      // 2b. Route-only Sheet CRUD ops
+      // 2b. Sheet CRUD ops
       if (op === 'sheet-add') {
         const out = store.addSheet(pid, {
           title: typeof body.title === 'string' ? body.title : undefined,
           orientation: body.orientation === 'landscape' ? 'landscape' : 'portrait',
           targetPages: typeof body.targetPages === 'number' ? body.targetPages : undefined,
           paper: body.paper === 'letter' ? 'letter' : 'a4',
+          actor: source,
         })
-        sendJson(res, 200, { ok: true, packetId: pid, rev: out.packet.rev, sheetId: out.sheetId })
+        sendJson(res, 200, { ok: true, packetId: pid, rev: out.packet.rev, sheetId: out.sheetId, sheetOrder: out.packet.sheetOrder })
         return
       }
       if (op === 'sheet-rename') {
-        const out = store.renameSheet(pid, String(body.sheetId ?? ''), typeof body.title === 'string' ? body.title : '')
+        const out = store.renameSheet(pid, String(body.sheetId ?? ''), typeof body.title === 'string' ? body.title : '', source)
         sendJson(res, 200, { ok: true, packetId: pid, rev: out.rev })
         return
       }
       if (op === 'sheet-remove') {
-        const out = store.removeSheet(pid, String(body.sheetId ?? ''))
+        const out = store.removeSheet(pid, String(body.sheetId ?? ''), source)
         sendJson(res, 200, { ok: true, packetId: pid, rev: out.rev, sheetOrder: out.sheetOrder })
         return
       }
@@ -546,34 +547,30 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         return
       }
 
-      // 4. Route-only op: update-geometry (targetPages / paper / margin)
-      if (op === 'update-geometry') {
+      // 4. Sheet geometry / metadata update (`update-geometry` or `sheet-update`)
+      if (op === 'update-geometry' || op === 'sheet-update') {
         const sheetId = (typeof body.sheetId === 'string' ? body.sheetId : packet.sheetOrder[0]) as SheetId
         if (!packet.sheets[sheetId]) {
           sendFailure(res, { ok: false, code: Err.SHEET_NOT_FOUND, message: `sheet ${sheetId} not found` })
           return
         }
-        const resCommit = store.commit(pid, null, (p) => {
-          const sh = p.sheets[sheetId]
-          if ('targetPages' in body) {
-            const tp = body.targetPages
-            if (tp === null || tp === undefined || tp === '') {
-              delete sh.geometry.targetPages
-            } else if (typeof tp === 'number' && Number.isFinite(tp) && tp >= 1) {
-              sh.geometry.targetPages = Math.floor(tp)
-            } else {
-              throw new StoreError('invalid_op', 'targetPages must be positive integer or null')
-            }
-          }
-          if (body.paper === 'a4' || body.paper === 'letter') {
-            sh.geometry.paper = body.paper
-          }
-          if (body.orientation === 'portrait' || body.orientation === 'landscape') {
-            sh.geometry.orientation = body.orientation
-          }
-          return null
-        })
-        sendJson(res, 200, { ok: true, packetId: pid, rev: resCommit.rev, sheetId })
+        const patch: {
+          title?: string
+          targetPages?: number | null
+          orientation?: 'portrait' | 'landscape'
+          paper?: 'a4' | 'letter'
+        } = {}
+        if (typeof body.title === 'string') patch.title = body.title
+        if ('targetPages' in body) {
+          const tp = body.targetPages
+          if (tp === null || tp === undefined || tp === '' || tp === 0) patch.targetPages = null
+          else if (typeof tp === 'number' && Number.isFinite(tp) && tp >= 1) patch.targetPages = Math.floor(tp)
+          else throw new StoreError('invalid_op', 'targetPages must be positive integer or null')
+        }
+        if (body.paper === 'a4' || body.paper === 'letter') patch.paper = body.paper
+        if (body.orientation === 'portrait' || body.orientation === 'landscape') patch.orientation = body.orientation
+        const updated = store.updateSheet(pid, sheetId, patch, source)
+        sendJson(res, 200, { ok: true, packetId: pid, rev: updated.rev, sheetId })
         return
       }
 
@@ -650,32 +647,38 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       // 6. Standard writer ops: insert | patch | move | remove
       if (op === 'insert' || op === 'patch' || op === 'move' || op === 'remove') {
         const blockId = typeof body.blockId === 'string' ? body.blockId : undefined
+        const explicitSheetId = typeof body.sheetId === 'string' ? (body.sheetId as SheetId) : undefined
         const located = blockId ? findBlock(packet, blockId) : null
-        const sheetId = (typeof body.sheetId === 'string' ? body.sheetId : located?.sheet.id ?? packet.sheetOrder[0]) as SheetId
-        const sheet = packet.sheets[sheetId]
-        if (!sheet) {
-          sendFailure(res, { ok: false, code: Err.SHEET_NOT_FOUND, message: `sheet ${sheetId} not found` })
+        const previewSheetId = explicitSheetId ?? located?.sheet.id ?? packet.sheetOrder[0]
+        if (explicitSheetId && !packet.sheets[explicitSheetId]) {
+          sendFailure(res, { ok: false, code: Err.SHEET_NOT_FOUND, message: `sheet ${explicitSheetId} not found` })
           return
         }
+        const sheetForIndex = packet.sheets[previewSheetId]
 
-        // Normalize Spec 02 §4.4 `afterBlockId` / `index` alongside `beforeId` / `toAfterId`
+        // Normalize Spec 02 §4.4 `afterId` / `afterBlockId` / `index` alongside `beforeId` / `toAfterId`
         let beforeId = typeof body.beforeId === 'string' ? body.beforeId : undefined
-        if (!beforeId && op === 'insert') {
-          if (typeof body.afterBlockId === 'string') {
-            const idx = sheet.blocks.findIndex((b) => b.id === body.afterBlockId)
-            if (idx >= 0 && idx + 1 < sheet.blocks.length) beforeId = sheet.blocks[idx + 1].id
-          } else if (typeof body.index === 'number' && body.index >= 0 && body.index < sheet.blocks.length) {
-            beforeId = sheet.blocks[body.index].id
+        const afterId =
+          typeof body.afterId === 'string'
+            ? body.afterId
+            : typeof body.afterBlockId === 'string'
+              ? body.afterBlockId
+              : undefined
+        if (!beforeId && !afterId && op === 'insert' && sheetForIndex) {
+          if (typeof body.index === 'number' && body.index >= 0 && body.index < sheetForIndex.blocks.length) {
+            beforeId = sheetForIndex.blocks[body.index].id
           }
         }
 
         let toBeforeId = typeof body.toBeforeId === 'string' ? body.toBeforeId : undefined
         let toAfterId = typeof body.toAfterId === 'string' ? body.toAfterId : undefined
         if (op === 'move' && !toBeforeId && !toAfterId) {
-          const targetSh = packet.sheets[(typeof body.toSheetId === 'string' ? body.toSheetId : sheetId) as SheetId] ?? sheet
+          const targetSh =
+            packet.sheets[(typeof body.toSheetId === 'string' ? body.toSheetId : previewSheetId) as SheetId] ??
+            sheetForIndex
           if (typeof body.afterBlockId === 'string') {
             toAfterId = body.afterBlockId
-          } else if (typeof body.index === 'number') {
+          } else if (typeof body.index === 'number' && targetSh) {
             const without = targetSh.blocks.filter((b) => b.id !== blockId)
             if (body.index <= 0 && without.length > 0) toBeforeId = without[0].id
             else if (body.index > 0 && body.index <= without.length) toAfterId = without[Math.min(body.index, without.length) - 1].id
@@ -696,10 +699,11 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
         const result = await galleyEditBlock(deps, {
           packetId: pid,
-          sheetId,
+          ...(explicitSheetId !== undefined ? { sheetId: explicitSheetId } : {}),
           op,
           origin: source,
           beforeId,
+          afterId,
           block: body.block as Record<string, unknown> | undefined,
           blockId,
           baseHash: typeof body.baseHash === 'string' ? body.baseHash : undefined,

@@ -26,6 +26,7 @@ import type {
   SheetProofReceipt,
   GalleyProposal,
   GalleyAnnotation,
+  GalleyJournalEntry,
   BlockOutline,
   ExportFileReceipt,
   GalleyPreflightWarning,
@@ -527,6 +528,7 @@ export function buildBlock(
 function toReceipt(sr: SheetRender, packet: GalleyPacket, sheet?: GalleySheet): SheetProofReceipt {
   const tp = sheet?.geometry?.targetPages
   return {
+    ...(sheet?.id ? { sheetId: sheet.id } : {}),
     pages: sr.pages,
     perPage: sr.perPage,
     lastPageLineCount: sr.lastPageLineCount,
@@ -560,6 +562,7 @@ async function computeProofs(
     } catch {
       const tp = sheet.geometry.targetPages
       out[sid] = {
+        sheetId: sid,
         pages: 0,
         perPage: [],
         lastPageLineCount: 0,
@@ -793,6 +796,7 @@ export async function galleyStatus(deps: GalleyToolsDeps, args: StatusArgs): Pro
   blocks: Record<SheetId, BlockOutline[]>
   proposals: GalleyProposal[]
   annotations: GalleyAnnotation[]
+  recentChanges: GalleyJournalEntry[]
   preflight: GalleyPreflightWarning[]
   proofs: Record<SheetId, SheetProofReceipt | null>
 }> | ToolFailure> {
@@ -819,6 +823,7 @@ export async function galleyStatus(deps: GalleyToolsDeps, args: StatusArgs): Pro
     blocks,
     proposals: deps.store.listProposals(pid).filter((p) => p.status === 'pending'),
     annotations: deps.store.listAnnotations(pid).filter((a) => !a.resolved),
+    recentChanges: deps.store.listJournal(pid),
     preflight,
     proofs,
   }
@@ -883,12 +888,20 @@ function summary(b: Block): string {
 
 export interface EditBlockArgs {
   packetId?: string
-  /** Optional (spec 02 §4.4): resolved from `blockId`'s sheet or packet's first sheet when omitted. */
+  /**
+   * Target sheet id (`s1`, `s2`, …).
+   * - `patch`/`move`/`remove`: auto-resolved from `blockId`'s owning sheet when omitted.
+   * - `insert`: auto-resolved from `beforeId`/`afterId` anchor or `s1` on single-sheet packets;
+   *   REQUIRED on multi-sheet packets when no `beforeId`/`afterId` anchor is supplied.
+   * - `sheet-update`/`sheet-remove`: target sheet (defaults to `s1` on single-sheet `sheet-update`).
+   */
   sheetId?: SheetId
-  op: 'insert' | 'patch' | 'move' | 'remove'
+  op: 'insert' | 'patch' | 'move' | 'remove' | 'sheet-add' | 'sheet-update' | 'sheet-remove'
   origin: 'human' | 'agent'
   // insert:
   beforeId?: BlockId
+  afterId?: BlockId
+  afterBlockId?: BlockId
   block?: Record<string, unknown>
   // patch / move / remove:
   blockId?: BlockId
@@ -899,13 +912,20 @@ export interface EditBlockArgs {
   toSheetId?: SheetId
   toBeforeId?: BlockId
   toAfterId?: BlockId
+  // sheet-add / sheet-update:
+  title?: string
+  targetPages?: number | null
+  orientation?: 'portrait' | 'landscape'
+  paper?: 'a4' | 'letter'
 }
 
 export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs): Promise<Ok<{
   applied: boolean
   packetId: string
+  sheetId: SheetId
+  sheetOrder?: SheetId[]
   rev: number
-  /** The block that was written (compact outline), or null (proposal path). */
+  /** The block that was written (compact outline), or null (proposal / sheet op path). */
   block: BlockOutline | null
   /** The proposal recorded (when reviewMode==='review' or agent patch on human block), if any. */
   proposal: { id: string; op: string; targetBlockId: BlockId; status: 'pending' } | null
@@ -917,18 +937,150 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
   const pid = resolvePacketId(deps, args.packetId)
   if (typeof pid !== 'string') return pid
   const packet = store.load(pid)!
+  const inReviewMode = (packet.reviewMode ?? 'auto') === 'review'
+
+  // Sheet-level ops (`sheet-add` | `sheet-update` | `sheet-remove`) through the single writer
+  if (args.op === 'sheet-add' || args.op === 'sheet-update' || args.op === 'sheet-remove') {
+    if (inReviewMode && args.origin === 'agent') {
+      return fail(Err.INVALID_PARAMS, 'packet is locked in review mode; unlock auto mode before sheet structure edits')
+    }
+    try {
+      let targetSid: SheetId
+      if (args.op === 'sheet-add') {
+        if (args.targetPages !== undefined && args.targetPages !== null && (!Number.isFinite(args.targetPages) || args.targetPages < 0)) {
+          return fail(Err.INVALID_PARAMS, 'targetPages must be >= 1 (or 0/null for unbounded)')
+        }
+        if (args.orientation !== undefined && args.orientation !== 'portrait' && args.orientation !== 'landscape') {
+          return fail(Err.INVALID_PARAMS, `invalid orientation '${String(args.orientation)}'`)
+        }
+        if (args.paper !== undefined && args.paper !== 'a4' && args.paper !== 'letter') {
+          return fail(Err.INVALID_PARAMS, `invalid paper '${String(args.paper)}'`)
+        }
+        const added = store.addSheet(pid, {
+          title: args.title,
+          orientation: args.orientation,
+          targetPages: args.targetPages && args.targetPages > 0 ? args.targetPages : undefined,
+          paper: args.paper,
+          actor: args.origin,
+        })
+        targetSid = added.sheetId
+      } else if (args.op === 'sheet-update') {
+        const sid = args.sheetId ?? (packet.sheetOrder.length === 1 ? packet.sheetOrder[0] : undefined)
+        if (!sid) {
+          return fail(Err.INVALID_PARAMS, `multi-sheet packet (${packet.sheetOrder.join(', ')}): pass sheetId on sheet-update`)
+        }
+        if (!packet.sheets[sid]) return fail(Err.SHEET_NOT_FOUND, `sheet ${sid} not found`)
+        if (
+          args.title === undefined &&
+          args.targetPages === undefined &&
+          args.orientation === undefined &&
+          args.paper === undefined
+        ) {
+          return fail(Err.INVALID_PARAMS, 'sheet-update requires at least one of title, targetPages, orientation, or paper')
+        }
+        store.updateSheet(
+          pid,
+          sid,
+          {
+            ...(args.title !== undefined ? { title: args.title } : {}),
+            ...(args.targetPages !== undefined ? { targetPages: args.targetPages } : {}),
+            ...(args.orientation !== undefined ? { orientation: args.orientation } : {}),
+            ...(args.paper !== undefined ? { paper: args.paper } : {}),
+          },
+          args.origin,
+        )
+        targetSid = sid
+      } else {
+        // sheet-remove
+        if (!args.sheetId) return fail(Err.INVALID_PARAMS, 'sheet-remove requires sheetId')
+        if (!packet.sheets[args.sheetId]) return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
+        const updated = store.removeSheet(pid, args.sheetId, args.origin)
+        targetSid = updated.sheetOrder[0]
+      }
+
+      const loaded = store.load(pid)!
+      const sh = loaded.sheets[targetSid]
+      const proof =
+        deps.render && sh
+          ? await (async () => {
+              try {
+                return toReceipt(
+                  await deps.render!(sh, loaded, assetBytesForPacket(deps, loaded)),
+                  loaded,
+                  sh,
+                )
+              } catch {
+                return null
+              }
+            })()
+          : null
+      return {
+        ok: true,
+        applied: true,
+        packetId: pid,
+        sheetId: targetSid,
+        sheetOrder: loaded.sheetOrder,
+        rev: loaded.rev,
+        block: null,
+        proposal: null,
+        proof,
+        staleDependents: staleBlockIds(loaded),
+      }
+    } catch (e) {
+      return mapError(e)
+    }
+  }
 
   if (args.sheetId !== undefined && !packet.sheets[args.sheetId]) {
     return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
   }
+
+  const insertAfterId = args.op === 'insert' ? (args.afterId ?? args.afterBlockId) : undefined
+  const insertAnchorId = args.op === 'insert' ? (args.beforeId ?? insertAfterId) : undefined
+  const locatedAnchor = insertAnchorId ? findBlock(packet, insertAnchorId) : null
+  if (insertAnchorId && !locatedAnchor) {
+    return fail(Err.BLOCK_NOT_FOUND, `anchor block ${insertAnchorId} not found`)
+  }
+  if (locatedAnchor && args.sheetId !== undefined && args.sheetId !== locatedAnchor.sheet.id) {
+    return fail(
+      Err.INVALID_PARAMS,
+      `anchor block ${insertAnchorId} belongs to sheet ${locatedAnchor.sheet.id}, not ${args.sheetId}`,
+    )
+  }
+
+  let resolvedSheetId: SheetId
+  if (args.op === 'insert') {
+    if (args.sheetId !== undefined) {
+      resolvedSheetId = args.sheetId
+    } else if (locatedAnchor) {
+      resolvedSheetId = locatedAnchor.sheet.id
+    } else if (packet.sheetOrder.length === 1) {
+      resolvedSheetId = packet.sheetOrder[0]
+    } else {
+      return fail(
+        Err.INVALID_PARAMS,
+        `multi-sheet packet (${packet.sheetOrder.join(', ')}): pass sheetId (or beforeId/afterId) on insert`,
+      )
+    }
+  } else {
+    const locatedPre = args.blockId ? findBlock(packet, args.blockId) : null
+    resolvedSheetId = args.sheetId ?? (locatedPre ? locatedPre.sheet.id : packet.sheetOrder[0])
+  }
+
   const locatedPre = args.blockId ? findBlock(packet, args.blockId) : null
-  const resolvedSheetId: SheetId =
-    args.sheetId ?? (args.op !== 'insert' && locatedPre ? locatedPre.sheet.id : packet.sheetOrder[0])
   const sheet = packet.sheets[resolvedSheetId]
   if (!sheet) return fail(Err.SHEET_NOT_FOUND, `sheet ${resolvedSheetId} not found`)
 
+  // Convert `afterId` on insert into the concrete `beforeId` (or undefined = append at end)
+  let effectiveBeforeId = args.beforeId
+  if (!effectiveBeforeId && insertAfterId) {
+    const idx = sheet.blocks.findIndex((b) => b.id === insertAfterId)
+    if (idx >= 0 && idx + 1 < sheet.blocks.length) {
+      effectiveBeforeId = sheet.blocks[idx + 1].id
+    }
+  }
+
   try {
-    const inReviewMode = (packet.reviewMode ?? 'auto') === 'review'
     const prePatchOrigin = args.op === 'patch' ? locatedPre?.block?.origin : undefined
     const shouldPropose =
       args.origin === 'agent' && (inReviewMode || (args.op === 'patch' && prePatchOrigin === 'human'))
@@ -947,7 +1099,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
           sheetId: resolvedSheetId,
           targetBlockId: built.id,
           baseHash: '',
-          proposedPatch: { block: built, beforeId: args.beforeId },
+          proposedPatch: { block: built, beforeId: effectiveBeforeId },
           status: 'pending',
           createdAtRev: packet.rev,
         }
@@ -1017,10 +1169,11 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
       store.addProposal(pid, prop)
       const loadedProp = store.load(pid)!
       const renderProp = deps.render
+      const propSheetId = prop.sheetId ?? resolvedSheetId
       const proofProp = renderProp
         ? await (async () => {
             try {
-              const propSheet = loadedProp.sheets[resolvedSheetId]
+              const propSheet = loadedProp.sheets[propSheetId]
               return toReceipt(
                 await renderProp(propSheet, loadedProp, assetBytesForPacket(deps, loadedProp)),
                 loadedProp,
@@ -1035,6 +1188,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
         ok: true,
         applied: false,
         packetId: pid,
+        sheetId: propSheetId,
         rev: loadedProp.rev,
         block: null,
         proposal: { id: prop.id, op: prop.op ?? 'patch', targetBlockId: prop.targetBlockId, status: 'pending' },
@@ -1046,6 +1200,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
     const needsExpect = (args.op === 'patch' || args.op === 'remove' || args.op === 'move') && args.baseHash !== undefined
     let changedId: BlockId | null = null
     let touchedSheetId: SheetId = resolvedSheetId
+    let commitNote = ''
     store.commit(
       pid,
       needsExpect ? { blockId: args.blockId ?? '', baseHash: args.baseHash! } : null,
@@ -1056,10 +1211,11 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             if (!args.block) throw new StoreError('invalid_op', 'insert requires a block')
             const { block, error } = buildBlock(p, args.block, args.origin)
             if (error) throw new StoreError(error, 'invalid block')
-            const idx = args.beforeId ? sh.blocks.findIndex((b) => b.id === args.beforeId) : sh.blocks.length
+            const idx = effectiveBeforeId ? sh.blocks.findIndex((b) => b.id === effectiveBeforeId) : sh.blocks.length
             sh.blocks.splice(idx < 0 ? sh.blocks.length : idx, 0, block)
             p.nextBlockSeq += 1
             changedId = block.id
+            commitNote = `insert ${block.id} (${block.type}) on ${resolvedSheetId} (${args.origin})`
             return block.id
           }
           case 'patch': {
@@ -1130,6 +1286,8 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
               if (e) throw new StoreError(e, 'inline limit')
             }
             changedId = found.block.id
+            const patchedKeys = Object.keys(patchInput).join(',') || 'noop'
+            commitNote = `patch ${found.block.id} (${found.block.type}:${patchedKeys}) on ${touchedSheetId} (${args.origin})`
             return found.block.id
           }
           case 'move': {
@@ -1137,6 +1295,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             if (!id) throw new StoreError('invalid_op', 'move requires blockId')
             const from = findBlock(p, id)
             if (!from) throw new StoreError('not_found', `block ${id} not found`)
+            const fromSid = from.sheet.id
             const targetSheet = p.sheets[args.toSheetId ?? resolvedSheetId]
             if (!targetSheet) throw new StoreError('invalid_op', `target sheet not found`)
             from.sheet.blocks.splice(from.index, 1)
@@ -1149,6 +1308,10 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             targetSheet.blocks.splice(to < 0 ? targetSheet.blocks.length : to, 0, from.block)
             touchedSheetId = targetSheet.id
             changedId = id
+            commitNote =
+              fromSid === targetSheet.id
+                ? `move ${id} within ${targetSheet.id} (${args.origin})`
+                : `move ${id} ${fromSid}→${targetSheet.id} (${args.origin})`
             return id
           }
           case 'remove': {
@@ -1158,11 +1321,13 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
             found.sheet.blocks.splice(found.index, 1)
             touchedSheetId = found.sheet.id
             changedId = found.block.id
+            commitNote = `remove ${found.block.id} (${found.block.type}) from ${touchedSheetId} (${args.origin})`
             return found.block.id
           }
         }
         return null
       },
+      { actor: args.origin, note: () => commitNote || `edit (${args.origin})` },
     )
 
     const loaded = store.load(pid)!
@@ -1193,6 +1358,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
       ok: true,
       applied: true,
       packetId: pid,
+      sheetId: touchedSheetId,
       rev: loaded.rev,
       block,
       proposal: null,
@@ -1398,20 +1564,55 @@ function inlineToMarkdown(inlines: Inline[]): string {
     .join('')
 }
 
+function mdCell(inlines: Inline[]): string {
+  return inlineToMarkdown(inlines)
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, '<br>')
+    .trim()
+}
+
 function toMarkdown(sheet: GalleySheet): string {
   const L: string[] = [`# ${sheet.title}`, '']
+  let taskNum = 0
   for (const b of sheet.blocks) {
     if (b.type === 'header') {
-      L.push(`**${b.fields.titel ?? ''}**${b.fields.fach ? ` · ${b.fields.fach}` : ''}${b.fields.name ? ` · ${b.fields.name}` : ''}`)
+      const f = b.fields ?? { titel: '' }
+      const meta: string[] = []
+      if (f.fach) meta.push(`Fach: ${f.fach}`)
+      if (f.klasse) meta.push(`Klasse: ${f.klasse}`)
+      if (f.datum) meta.push(`Datum: ${f.datum}`)
+      if (f.name !== undefined) {
+        meta.push(f.name ? `Name: ${f.name}` : 'Name: ________________________')
+      }
+      L.push(`**${f.titel ?? ''}**${meta.length > 0 ? ` · ${meta.join(' · ')}` : ''}`)
     } else if (b.type === 'heading') {
       L.push(`${'#'.repeat(b.level)} ${inlineToMarkdown(b.body)}`)
+    } else if (b.type === 'source_text') {
+      if (b.title) L.push(`### ${b.title}`)
+      L.push(inlineToMarkdown(b.body))
+    } else if (b.type === 'task') {
+      taskNum += 1
+      const bodyMd = inlineToMarkdown(b.body)
+      const hasPrefix = /^\*{0,2}\s*Aufgabe\s+\d+\b/i.test(bodyMd)
+      L.push(hasPrefix ? bodyMd : `**Aufgabe ${taskNum}:** ${bodyMd}`)
     } else if (b.type === 'table') {
-      const cell = (c: Inline[]) => inlineToMarkdown(c)
-      L.push(b.headers.map((c) => `| **${cell(c)}**`).join(' '))
-      L.push(`|${b.headers.map(() => ' --- ').join('')}`)
-      for (const row of b.rows) L.push(`|${row.map((c) => cell(c)).join(' ')}`)
+      const colCount = Math.max(
+        b.headers.length,
+        ...b.rows.map((r) => r.length),
+        1,
+      )
+      const headerCells = Array.from({ length: colCount }, (_, i) => {
+        const text = b.headers[i] ? mdCell(b.headers[i]) : ''
+        return text ? `**${text}**` : ''
+      })
+      L.push(`| ${headerCells.join(' | ')} |`)
+      L.push(`| ${Array.from({ length: colCount }, () => '---').join(' | ')} |`)
+      for (const row of b.rows) {
+        const rowCells = Array.from({ length: colCount }, (_, i) => (row[i] ? mdCell(row[i]) : ''))
+        L.push(`| ${rowCells.join(' | ')} |`)
+      }
     } else if (b.type === 'callout') {
-      L.push(`> [${b.tone}] ${inlineToMarkdown(b.body)}`)
+      L.push(`> [${b.tone}] ${inlineToMarkdown(b.body).replace(/\n/g, '\n> ')}`)
     } else {
       const body = (b as { body?: Inline[] }).body
       L.push(body ? inlineToMarkdown(body) : '')

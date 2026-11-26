@@ -40,6 +40,7 @@ import type {
   AssetMeta,
   GalleyProposal,
   GalleyAnnotation,
+  GalleyJournalEntry,
   GalleyTemplateBlueprint,
   PageGeometry,
   ReviewMode,
@@ -211,16 +212,25 @@ export class GalleyStore {
     return join(this.dir(id), 'redo.json')
   }
 
-  private bumpRev(id: string, note: string): GalleyPacket {
+  private bumpRev(id: string, note: string, actor?: 'human' | 'agent'): GalleyPacket {
     const packet = this.load(id)
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
     packet.rev += 1
     packet.updatedAt = new Date().toISOString()
     this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
-    const journal = this.readJson<{ rev: number; at: string; note: string }[]>(this.journalPath(id), [])
-    journal.push({ rev: packet.rev, at: packet.updatedAt, note })
+    const journal = this.readJson<GalleyJournalEntry[]>(this.journalPath(id), [])
+    journal.push({
+      rev: packet.rev,
+      at: packet.updatedAt,
+      ...(actor ? { actor } : {}),
+      note,
+    })
     this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
     return packet
+  }
+
+  listJournal(id: string): GalleyJournalEntry[] {
+    return this.readJson<GalleyJournalEntry[]>(this.journalPath(id), [])
   }
 
   create(packet: GalleyPacket): GalleyPacket {
@@ -274,27 +284,40 @@ export class GalleyStore {
     rmSync(dir, { recursive: true, force: true })
   }
 
-  renamePacket(id: string, title: string): GalleyPacket {
+  renamePacket(id: string, title: string, actor: 'human' | 'agent' = 'human'): GalleyPacket {
     const trimmed = title.trim()
     if (!trimmed) throw new StoreError('invalid_op', 'packet title must be non-empty')
-    return this.commit(id, null, (p) => {
-      p.title = trimmed
-      return null
-    }).packet
+    let oldTitle = ''
+    return this.commit(
+      id,
+      null,
+      (p) => {
+        oldTitle = p.title
+        p.title = trimmed
+        return null
+      },
+      { actor, note: () => `packet.title "${oldTitle}"→"${trimmed}" (${actor})` },
+    ).packet
   }
 
-  setReviewMode(id: string, mode: ReviewMode): GalleyPacket {
+  setReviewMode(id: string, mode: ReviewMode, actor: 'human' | 'agent' = 'human'): GalleyPacket {
     if (mode !== 'auto' && mode !== 'review') {
       throw new StoreError('invalid_op', `invalid reviewMode '${String(mode)}'`)
     }
     const packet = this.load(id)
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    const prevMode = packet.reviewMode ?? 'auto'
     packet.reviewMode = mode
     packet.rev += 1
     packet.updatedAt = new Date().toISOString()
     this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
-    const journal = this.readJson<{ rev: number; at: string; note: string }[]>(this.journalPath(id), [])
-    journal.push({ rev: packet.rev, at: packet.updatedAt, note: `reviewMode ${mode}` })
+    const journal = this.readJson<GalleyJournalEntry[]>(this.journalPath(id), [])
+    journal.push({
+      rev: packet.rev,
+      at: packet.updatedAt,
+      actor,
+      note: `reviewMode ${prevMode}→${mode} (${actor})`,
+    })
     this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
     return packet
   }
@@ -331,50 +354,139 @@ export class GalleyStore {
 
   addSheet(
     id: string,
-    opts?: { title?: string; orientation?: 'portrait' | 'landscape'; targetPages?: number; paper?: 'a4' | 'letter' },
+    opts?: {
+      title?: string
+      orientation?: 'portrait' | 'landscape'
+      targetPages?: number
+      paper?: 'a4' | 'letter'
+      actor?: 'human' | 'agent'
+    },
   ): { packet: GalleyPacket; sheetId: SheetId } {
     let createdSheetId: SheetId = 's1'
-    const res = this.commit(id, null, (p) => {
-      let n = p.sheetOrder.length + 1
-      while (p.sheets[`s${n}`]) n++
-      createdSheetId = `s${n}`
-      const geometry: PageGeometry = {
-        paper: opts?.paper ?? 'a4',
-        orientation: opts?.orientation ?? 'portrait',
-        margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
-        ...(opts?.targetPages !== undefined ? { targetPages: opts.targetPages } : {}),
-      }
-      p.sheets[createdSheetId] = {
-        id: createdSheetId,
-        title: opts?.title?.trim() || `Bogen ${p.sheetOrder.length + 1}`,
-        geometry,
-        blocks: [],
-      }
-      p.sheetOrder.push(createdSheetId)
-      return null
-    })
+    let createdTitle = ''
+    const actor = opts?.actor ?? 'human'
+    const res = this.commit(
+      id,
+      null,
+      (p) => {
+        let n = p.sheetOrder.length + 1
+        while (p.sheets[`s${n}`]) n++
+        createdSheetId = `s${n}`
+        const geometry: PageGeometry = {
+          paper: opts?.paper ?? 'a4',
+          orientation: opts?.orientation ?? 'portrait',
+          margin: { top: 2, right: 2.5, bottom: 2, left: 2.5 },
+          ...(opts?.targetPages !== undefined && opts.targetPages > 0 ? { targetPages: Math.floor(opts.targetPages) } : {}),
+        }
+        createdTitle = opts?.title?.trim() || `Bogen ${p.sheetOrder.length + 1}`
+        p.sheets[createdSheetId] = {
+          id: createdSheetId,
+          title: createdTitle,
+          geometry,
+          blocks: [],
+        }
+        p.sheetOrder.push(createdSheetId)
+        return null
+      },
+      { actor, note: () => `sheet-add ${createdSheetId} "${createdTitle}" (${actor})` },
+    )
     return { packet: res.packet, sheetId: createdSheetId }
   }
 
-  renameSheet(id: string, sheetId: SheetId, title: string): GalleyPacket {
+  renameSheet(id: string, sheetId: SheetId, title: string, actor: 'human' | 'agent' = 'human'): GalleyPacket {
     const trimmed = title.trim()
     if (!trimmed) throw new StoreError('invalid_op', 'sheet title must be non-empty')
-    return this.commit(id, null, (p) => {
-      const sh = p.sheets[sheetId]
-      if (!sh) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
-      sh.title = trimmed
-      return null
-    }).packet
+    let oldTitle = ''
+    return this.commit(
+      id,
+      null,
+      (p) => {
+        const sh = p.sheets[sheetId]
+        if (!sh) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
+        oldTitle = sh.title
+        sh.title = trimmed
+        return null
+      },
+      { actor, note: () => `sheet ${sheetId}.title "${oldTitle}"→"${trimmed}" (${actor})` },
+    ).packet
   }
 
-  removeSheet(id: string, sheetId: SheetId): GalleyPacket {
-    return this.commit(id, null, (p) => {
-      if (!p.sheets[sheetId]) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
-      if (p.sheetOrder.length <= 1) throw new StoreError('invalid_op', 'cannot remove the last remaining sheet')
-      delete p.sheets[sheetId]
-      p.sheetOrder = p.sheetOrder.filter((sid) => sid !== sheetId)
-      return null
-    }).packet
+  updateSheet(
+    id: string,
+    sheetId: SheetId,
+    patch: {
+      title?: string
+      targetPages?: number | null
+      orientation?: 'portrait' | 'landscape'
+      paper?: 'a4' | 'letter'
+    },
+    actor: 'human' | 'agent' = 'human',
+  ): GalleyPacket {
+    const diffs: string[] = []
+    return this.commit(
+      id,
+      null,
+      (p) => {
+        const sh = p.sheets[sheetId]
+        if (!sh) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
+        if (patch.title !== undefined) {
+          const t = patch.title.trim()
+          if (!t) throw new StoreError('invalid_op', 'sheet title must be non-empty')
+          if (t !== sh.title) diffs.push(`title "${sh.title}"→"${t}"`)
+          sh.title = t
+        }
+        if ('targetPages' in patch) {
+          const prevTp = sh.geometry.targetPages ?? null
+          const tp = patch.targetPages
+          if (tp === null || tp === undefined || tp === 0) {
+            delete sh.geometry.targetPages
+            if (prevTp !== null) diffs.push(`targetPages ${prevTp}→null`)
+          } else if (typeof tp === 'number' && Number.isFinite(tp) && tp >= 1) {
+            const nextTp = Math.floor(tp)
+            sh.geometry.targetPages = nextTp
+            if (prevTp !== nextTp) diffs.push(`targetPages ${prevTp ?? 'null'}→${nextTp}`)
+          } else {
+            throw new StoreError('invalid_op', 'targetPages must be positive integer or 0/null to clear')
+          }
+        }
+        if (patch.orientation !== undefined) {
+          if (patch.orientation !== 'portrait' && patch.orientation !== 'landscape') {
+            throw new StoreError('invalid_op', `invalid orientation '${String(patch.orientation)}'`)
+          }
+          const prevOr = sh.geometry.orientation ?? 'portrait'
+          sh.geometry.orientation = patch.orientation
+          if (prevOr !== patch.orientation) diffs.push(`orientation ${prevOr}→${patch.orientation}`)
+        }
+        if (patch.paper !== undefined) {
+          if (patch.paper !== 'a4' && patch.paper !== 'letter') {
+            throw new StoreError('invalid_op', `invalid paper '${String(patch.paper)}'`)
+          }
+          const prevPaper = sh.geometry.paper
+          sh.geometry.paper = patch.paper
+          if (prevPaper !== patch.paper) diffs.push(`paper ${prevPaper}→${patch.paper}`)
+        }
+        return null
+      },
+      {
+        actor,
+        note: () => `sheet ${sheetId} ${diffs.length > 0 ? diffs.join(', ') : 'updated'} (${actor})`,
+      },
+    ).packet
+  }
+
+  removeSheet(id: string, sheetId: SheetId, actor: 'human' | 'agent' = 'human'): GalleyPacket {
+    return this.commit(
+      id,
+      null,
+      (p) => {
+        if (!p.sheets[sheetId]) throw new StoreError('invalid_op', `sheet ${sheetId} not found`)
+        if (p.sheetOrder.length <= 1) throw new StoreError('invalid_op', 'cannot remove the last remaining sheet')
+        delete p.sheets[sheetId]
+        p.sheetOrder = p.sheetOrder.filter((sid) => sid !== sheetId)
+        return null
+      },
+      { actor, note: `sheet-remove ${sheetId} (${actor})` },
+    ).packet
   }
 
   reorderSheet(id: string, sheetId: SheetId, direction: 'left' | 'right'): GalleyPacket {
@@ -496,6 +608,7 @@ export class GalleyStore {
     id: string,
     expect: { blockId: BlockId; baseHash: string } | null,
     apply: (p: GalleyPacket) => BlockId | null,
+    meta?: { actor?: 'human' | 'agent'; note?: string | (() => string) },
   ): CommitResult {
     const packet = this.load(id)
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
@@ -538,9 +651,18 @@ export class GalleyStore {
     const touched = touchedId ? findBlock(packet, touchedId) : null
     const changeHash = touched ? touched.block.hash : null
 
-    // Journal: append, keep last JOURNAL_KEEP.
-    const journal = this.readJson<{ rev: number; at: string; note: string }[]>(this.journalPath(id), [])
-    journal.push({ rev: packet.rev, at: packet.updatedAt, note: touchedId ? `edit ${touchedId}` : 'edit' })
+    // Journal: append attributed entry, keep last JOURNAL_KEEP.
+    const resolvedNote =
+      typeof meta?.note === 'function'
+        ? meta.note()
+        : meta?.note ?? (touchedId ? `edit ${touchedId}${meta?.actor ? ` (${meta.actor})` : ''}` : 'edit')
+    const journal = this.readJson<GalleyJournalEntry[]>(this.journalPath(id), [])
+    journal.push({
+      rev: packet.rev,
+      at: packet.updatedAt,
+      ...(meta?.actor ? { actor: meta.actor } : {}),
+      note: resolvedNote,
+    })
     this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
 
     // Undo ring: push previous snapshot, keep last UNDO_DEPTH. Forward mutation clears redo.
@@ -610,6 +732,23 @@ export class GalleyStore {
     return this.readJson<GalleyPacket[]>(this.redoPath(id), []).length
   }
 
+  /**
+   * Read-only lookup of a prior snapshot at or before `targetRev` from the
+   * undo ring (used by `inject.ts` to compute exact changed-block deltas even
+   * after session resume). Returns null if pruned or unavailable.
+   */
+  snapshotAtRev(id: string, targetRev: number): GalleyPacket | null {
+    if (targetRev <= 0) return null
+    const undo = this.readJson<GalleyPacket[]>(this.undoPath(id), [])
+    for (let i = undo.length - 1; i >= 0; i--) {
+      if (undo[i].rev === targetRev) return undo[i]
+    }
+    for (let i = undo.length - 1; i >= 0; i--) {
+      if (undo[i].rev < targetRev) return undo[i]
+    }
+    return null
+  }
+
   // ── proposals + annotations (bump packet.rev so rev-polling observes deltas) ──
 
   addProposal(id: string, proposal: GalleyProposal): GalleyProposal {
@@ -617,7 +756,7 @@ export class GalleyStore {
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
     const next = [...this.readJson<GalleyProposal[]>(join(this.dir(id), 'proposals.json'), []), proposal]
     this.atomicWrite(join(this.dir(id), 'proposals.json'), JSON.stringify(next))
-    this.bumpRev(id, `proposal ${proposal.id}`)
+    this.bumpRev(id, `proposal ${proposal.id} (${proposal.op ?? 'patch'} ${proposal.targetBlockId})`, 'agent')
     return proposal
   }
   listProposals(id: string): GalleyProposal[] {
@@ -629,7 +768,7 @@ export class GalleyStore {
     if (!p) return null
     p.status = status
     this.atomicWrite(join(this.dir(id), 'proposals.json'), JSON.stringify(list))
-    if (opts?.bumpRev !== false) this.bumpRev(id, `proposal ${proposalId} ${status}`)
+    if (opts?.bumpRev !== false) this.bumpRev(id, `proposal ${proposalId} ${status} (human)`, 'human')
     return p
   }
   /**
@@ -750,20 +889,20 @@ export class GalleyStore {
     const list = this.readJson<GalleyAnnotation[]>(join(this.dir(id), 'annotations.json'), [])
     list.push(annotation)
     this.atomicWrite(join(this.dir(id), 'annotations.json'), JSON.stringify(list))
-    this.bumpRev(id, `annotation ${annotation.id}`)
+    this.bumpRev(id, `annotation ${annotation.id} on ${annotation.blockId} (${annotation.author})`, annotation.author)
     return annotation
   }
   listAnnotations(id: string, blockId?: BlockId): GalleyAnnotation[] {
     const list = this.readJson<GalleyAnnotation[]>(join(this.dir(id), 'annotations.json'), [])
     return blockId ? list.filter((a) => a.blockId === blockId) : list
   }
-  setAnnotationResolved(id: string, annotationId: string, resolved: boolean): GalleyAnnotation | null {
+  setAnnotationResolved(id: string, annotationId: string, resolved: boolean, actor: 'human' | 'agent' = 'human'): GalleyAnnotation | null {
     const list = this.listAnnotations(id)
     const a = list.find((x) => x.id === annotationId)
     if (!a) return null
     a.resolved = resolved
     this.atomicWrite(join(this.dir(id), 'annotations.json'), JSON.stringify(list))
-    this.bumpRev(id, `annotation ${annotationId} ${resolved ? 'resolved' : 'unresolved'}`)
+    this.bumpRev(id, `annotation ${annotationId} ${resolved ? 'resolved' : 'unresolved'} (${actor})`, actor)
     return a
   }
 

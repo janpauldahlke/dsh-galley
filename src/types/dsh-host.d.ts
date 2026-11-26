@@ -25,6 +25,14 @@ declare module '@deepseek-ai/cordis' {
       register(def: Record<string, unknown>, component: unknown): void
     }
     /**
+     * Subscribe to a Cordis event (e.g. `agent/pre-step`).
+     */
+    on?: (
+      name: string,
+      listener: (...args: any[]) => any,
+      options?: boolean | { prepend?: boolean; global?: boolean },
+    ) => (() => void) | { dispose?: () => void }
+    /**
      * Register a disposer. The callback's RETURN VALUE is the disposer — return
      * the dispose function, do not call it.
      */
@@ -70,4 +78,62 @@ declare module '@deepseek-ai/dsh-client-ui-sidebar-right/client' {
 declare module '@deepseek-ai/dsh-host-webserver' {
   // Side-effect type import only; dsh-galley takes no named exports from it.
   export {}
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  export interface ContentBlock {
+    type: string
+    text?: string
+    [key: string]: unknown
+  }
+  export interface MessageSourceMap {
+    user: { kind: 'user' }
+    model: { kind: 'model' }
+    tool: { kind: 'tool' }
+    'system-prompt': { kind: 'system-prompt' }
+  }
+  export type MessageSource = MessageSourceMap[keyof MessageSourceMap]
+  interface MessageBase {
+    readonly id: string
+    readonly content: readonly ContentBlock[]
+    readonly source: MessageSource
+  }
+  export interface UserMessage extends MessageBase {
+    readonly role: 'user'
+  }
+}
+
+declare module '@deepseek-ai/dsh-session' {
+  export interface SessionHeader {
+    id?: string
+    cwd?: string
+    [key: string]: unknown
+  }
+  export interface SessionEvent {
+    seq: number
+    type: string
+    data: unknown
+  }
+  export interface SessionSurface {
+    nodes: Iterable<number>
+  }
+  export interface Session {
+    readonly id?: string
+    readonly header: SessionHeader
+    readonly surface: SessionSurface
+    eventAt(seq: number): SessionEvent | undefined
+    [key: string]: unknown
+  }
+}
+
+declare module '@deepseek-ai/dsh-agent' {
+  import type { UserMessage } from '@deepseek-ai/dsh-llm'
+  import type { Session } from '@deepseek-ai/dsh-session'
+  export type PreStepDecision =
+    | { readonly kind: 'reject' }
+    | { readonly kind: 'enter'; readonly messages: UserMessage[]; readonly startsRequestSeries?: boolean }
+  export interface Agent {
+    readonly session: Session
+    [key: string]: unknown
+  }
 }

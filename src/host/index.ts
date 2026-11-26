@@ -28,6 +28,17 @@ import {
 import type { GalleyPacket, GalleySheet } from '../shared/types.ts'
 import { renderTypstSource, type GalleyBlock } from '../typst/index.ts'
 import { createPrimaryArm, type Arm } from './arms/index.ts'
+import {
+  createGalleyUserMessage,
+  estimateTokens,
+  formatGalleyDelta,
+  installGalleyInject,
+  MAX_INJECT_CHARS,
+  scanResumedGalleyState,
+  type FormatGalleyDeltaInput,
+  type GalleyDeltaSource,
+  type GalleyInjectDeps,
+} from './inject.ts'
 import { registerGalleyRoutes } from './routes.ts'
 import { defaultGalleyRegistry, GalleyServiceRegistry, type GalleyService } from './service.ts'
 import {
@@ -57,10 +68,21 @@ export {
   PROPOSAL_ROUTE_PREFIX,
   PLUGIN,
   VERSION,
+  MAX_INJECT_CHARS,
   defaultGalleyRegistry,
   GalleyServiceRegistry,
+  installGalleyInject,
+  formatGalleyDelta,
+  scanResumedGalleyState,
+  createGalleyUserMessage,
+  estimateTokens,
 }
-export type { GalleyService }
+export type {
+  GalleyService,
+  GalleyDeltaSource,
+  GalleyInjectDeps,
+  FormatGalleyDeltaInput,
+}
 // Arms are re-exported so the in-process gate test (test/05) and the health
 // probe can drive the real render pipeline; `@myriaddreamin/*` stays external
 // (the native .node binary is loaded lazily by NativeArm.init).
@@ -297,8 +319,9 @@ export function registerGalleyTools(ctx: Context): () => void {
   register({
     name: 'galley_status',
     description:
-      'Report a packet’s current revision, block outlines (never full bodies), pending proposals / ' +
-      'unresolved annotations, preflight warnings, and per-sheet proofs (incl. targetPagesMet). Omit packetId to use the active packet.',
+      'Report a packet’s current revision, block outlines (never full bodies), pending proposals, ' +
+      'unresolved annotations, attributed recentChanges journal, preflight warnings, and per-sheet proofs (incl. sheetId & targetPagesMet). ' +
+      'Never inspect or edit `.dsh/galley/*` files directly via filesystem tools.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -310,7 +333,7 @@ export function registerGalleyTools(ctx: Context): () => void {
     },
     output: out({
       ok: { type: 'boolean' }, packetId: { type: 'string' }, rev: { type: 'integer' },
-      blocks: { type: 'object' }, proofs: { type: 'object' },
+      blocks: { type: 'object' }, proofs: { type: 'object' }, recentChanges: { type: 'array', items: { type: 'object', additionalProperties: true } },
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
@@ -353,25 +376,53 @@ export function registerGalleyTools(ctx: Context): () => void {
   register({
     name: 'galley_edit_block',
     description:
-      'The single writer: insert / patch / move / remove one block (spec 02 §4.4). ' +
-      'Notes: `task` auto-prepends "Aufgabe N"; `table` cells accept simple 2D strings with mini-markup (`headers: ["Zeit","Phase"]`, `rows: [["10m", "**Einstieg** – Thema"]]`) or Inline[], plus optional `colWidths` (`["15%","85%"]`); ' +
-      '`header.fields.name`: omit `name` on teacher-only sheets, pass `name: ""` for a student fill-in line.',
+      'The single writer for blocks AND sheets (never edit `.dsh/galley/*` files directly). ' +
+      'Block ops: `insert` | `patch` | `move` | `remove`. Sheet ops: `sheet-add` | `sheet-update` | `sheet-remove`. ' +
+      'Conventions: (1) On multi-sheet packets, `insert` REQUIRES `sheetId` (or `beforeId`/`afterId`); omitting `beforeId`/`afterId` appends to the end of `sheetId`. ' +
+      '(2) `task` auto-prepends "Aufgabe N" unless `body` already starts with "Aufgabe N". ' +
+      '(3) `dependsOn: ["b2"]` accepts block ID strings on both `insert` and `patch` (auto-snapshots `sinceHash`). ' +
+      '(4) `table` accepts 2D strings with mini-markup (`headers: ["Zeit","Phase"]`, `rows: [["10m", "**Einstieg**"]]`) + optional `colWidths` (`["15%","85%"]`). ' +
+      '(5) `header.fields.name`: pass `name: ""` for a student fill-in line; omit `name` on teacher-only sheets.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
         packetId: { type: 'string', description: 'Omit to use the session-sticky active packet.' },
-        sheetId: { type: 'string', description: 'Optional: auto-resolved from blockId or active sheet when omitted.' },
-        op: { type: 'string', enum: ['insert', 'patch', 'move', 'remove'] },
-        beforeId: { type: 'string' },
-        block: { type: 'object', additionalProperties: true },
-        blockId: { type: 'string' },
+        sheetId: {
+          type: 'string',
+          description:
+            'Target sheet (`s1`, `s2`, …). Required on `insert` for multi-sheet packets (unless `beforeId`/`afterId` is given) and on `sheet-remove` / multi-sheet `sheet-update`. Auto-resolved from `blockId` on `patch`/`move`/`remove`.',
+        },
+        op: {
+          type: 'string',
+          enum: ['insert', 'patch', 'move', 'remove', 'sheet-add', 'sheet-update', 'sheet-remove'],
+        },
+        beforeId: { type: 'string', description: 'insert: place before this block ID (omit `beforeId`/`afterId` to append to sheet end).' },
+        afterId: { type: 'string', description: 'insert: place immediately after this block ID.' },
+        block: { type: 'object', additionalProperties: true, description: 'insert: new block object (e.g. `{ type, body, dependsOn: ["b2"] }`).' },
+        blockId: { type: 'string', description: 'patch / move / remove: target block ID.' },
         baseHash: { type: 'string', description: 'Optional optimistic-lock hash; checked when supplied.' },
-        patch: { type: 'object', additionalProperties: true },
-        toSheetId: { type: 'string', description: 'Optional target sheet for cross-sheet move.' },
-        toBeforeId: { type: 'string' },
-        toAfterId: { type: 'string' },
+        patch: { type: 'object', additionalProperties: true, description: 'patch: fields to update (e.g. `{ body, dependsOn: ["b2"], colWidths }`).' },
+        toSheetId: { type: 'string', description: 'move: target sheet ID for cross-sheet move.' },
+        toBeforeId: { type: 'string', description: 'move: place before this block ID.' },
+        toAfterId: { type: 'string', description: 'move: place after this block ID.' },
+        title: { type: 'string', description: 'sheet-add / sheet-update: sheet title.' },
+        targetPages: {
+          type: 'integer',
+          minimum: 0,
+          description: 'sheet-add / sheet-update: page budget (>= 1), or pass 0 to clear to unbounded.',
+        },
+        orientation: {
+          type: 'string',
+          enum: ['portrait', 'landscape'],
+          description: 'sheet-add / sheet-update: page orientation.',
+        },
+        paper: {
+          type: 'string',
+          enum: ['a4', 'letter'],
+          description: 'sheet-add / sheet-update: paper size.',
+        },
       },
       required: ['op'],
     },
@@ -379,6 +430,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       ok: { type: 'boolean' },
       applied: { type: 'boolean' },
       packetId: { type: 'string' },
+      sheetId: { type: 'string' },
       rev: { type: 'integer' },
       staleDependents: { type: 'array', items: { type: 'string' } },
     }),
@@ -525,6 +577,14 @@ export function apply(ctx: Context): void {
     ctx.effect(() => disposeTools, 'galley: tools')
   } catch (error) {
     ctx.logger?.(PLUGIN)?.warn?.('tool registration failed (continuing without it): %s', errorMessage(error))
+  }
+
+  // KV-cache-safe agent/pre-step outline + delta inject (M3, works in web + headless profiles).
+  try {
+    const disposeInject = installGalleyInject(ctx, { getDepsForCwd, registry: defaultGalleyRegistry })
+    ctx.effect(() => disposeInject, 'galley: pre-step inject')
+  } catch (error) {
+    ctx.logger?.(PLUGIN)?.warn?.('pre-step inject registration failed (continuing without it): %s', errorMessage(error))
   }
   // Routes only exist where a web server is present (dsh web); headless
   // profiles simply skip them.

@@ -12,13 +12,28 @@
 import { join } from 'node:path'
 import { GalleyStore } from './store.ts'
 
-let lastGalleyCwd: string | null = null
-const storesByRoot = new Map<string, GalleyStore>()
+interface WorkspaceSingletonState {
+  lastGalleyCwd: string | null
+  storesByRoot: Map<string, GalleyStore>
+  sessionActivePackets: Map<string, string>
+}
+
+const WORKSPACE_SYM = Symbol.for('dsh-galley.workspace.v1')
+const g = globalThis as unknown as Record<symbol, WorkspaceSingletonState | undefined>
+if (!g[WORKSPACE_SYM]) {
+  g[WORKSPACE_SYM] = {
+    lastGalleyCwd: null,
+    storesByRoot: new Map<string, GalleyStore>(),
+    sessionActivePackets: new Map<string, string>(),
+  }
+}
+const wsState = g[WORKSPACE_SYM]!
+const storesByRoot = wsState.storesByRoot
 /**
  * Per-(root, sessionId) sticky active packet so human pane browsing never
  * hijacks an in-flight agent session's un-anchored tool calls (M2.7).
  */
-const sessionActivePackets = new Map<string, string>()
+const sessionActivePackets = wsState.sessionActivePackets
 
 export function setSessionActivePacket(
   root: string,
@@ -48,11 +63,11 @@ export function clearSessionActivePacket(packetId: string): void {
 
 export function noteGalleyCwd(cwd: string | null | undefined): void {
   const trimmed = cwd?.trim()
-  if (trimmed) lastGalleyCwd = trimmed
+  if (trimmed) wsState.lastGalleyCwd = trimmed
 }
 
 export function getGalleyCwd(): string {
-  return lastGalleyCwd ?? process.cwd()
+  return wsState.lastGalleyCwd ?? process.cwd()
 }
 
 export function resolveGalleyCwd(explicitCwd?: string | null, sessionCwd?: string | null): string {
@@ -87,7 +102,7 @@ export function getStoreForCwd(cwd?: string | null): { store: GalleyStore; root:
 }
 
 export function _resetGalleyWorkspaceForTests(): void {
-  lastGalleyCwd = null
+  wsState.lastGalleyCwd = null
   storesByRoot.clear()
   sessionActivePackets.clear()
 }
