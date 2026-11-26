@@ -217,8 +217,8 @@ export function blockText(block: Block): string {
   const b = block as unknown as Record<string, unknown>
   switch (block.type) {
     case 'header': {
-      const f = (block as { fields?: Record<string, string> }).fields ?? {}
-      return [f.titel, f.fach, f.klasse, f.datum, f.name].filter(Boolean).join(' · ')
+      const f = block.fields ?? { titel: '' }
+      return [f.titel, f.subtitle, f.fach, f.klasse, f.datum, f.name].filter(Boolean).join(' · ')
     }
     case 'table': {
       const cell = (c: Inline[]) => inlineText(c)
@@ -453,15 +453,33 @@ function normalizeDependsOn(
   return { deps, error: null }
 }
 
-/** Normalize neutral English header keys (`title`, `subject`/`subtitle`, `group`/`meta`, `date`) alongside canonical keys. */
-export function normalizeHeaderFields(rawFields: unknown): Record<string, string> {
+const KNOWN_HEADER_KEYS = new Set([
+  'titel',
+  'title',
+  'subtitle',
+  'untertitel',
+  'fach',
+  'subject',
+  'klasse',
+  'group',
+  'meta',
+  'datum',
+  'date',
+  'name',
+  '_unknownKeys',
+])
+
+/** Normalize neutral English & German header keys (`title`, `subtitle`, `subject`/`fach`, `group`/`meta`/`klasse`, `date`/`datum`, `name`). */
+export function normalizeHeaderFields(rawFields: unknown): Record<string, unknown> {
   if (!rawFields || typeof rawFields !== 'object' || Array.isArray(rawFields)) return { titel: '' }
   const f = rawFields as Record<string, unknown>
   const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
-  const out: Record<string, string> = {
+  const out: Record<string, unknown> = {
     titel: str(f.titel) ?? str(f.title) ?? '',
   }
-  const fach = str(f.fach) ?? str(f.subject) ?? str(f.subtitle)
+  const subtitle = str(f.subtitle) ?? str(f.untertitel)
+  if (subtitle !== undefined && subtitle !== '') out.subtitle = subtitle
+  const fach = str(f.fach) ?? str(f.subject)
   if (fach !== undefined) out.fach = fach
   const klasse = str(f.klasse) ?? str(f.group) ?? str(f.meta)
   if (klasse !== undefined) out.klasse = klasse
@@ -469,6 +487,12 @@ export function normalizeHeaderFields(rawFields: unknown): Record<string, string
   if (datum !== undefined) out.datum = datum
   if ('name' in f && f.name !== undefined && f.name !== null) {
     out.name = String(f.name)
+  }
+  const unknown = Object.keys(f).filter(
+    (k) => !KNOWN_HEADER_KEYS.has(k) && f[k] !== undefined && f[k] !== null && f[k] !== '',
+  )
+  if (unknown.length > 0) {
+    out._unknownKeys = unknown.sort()
   }
   return out
 }
@@ -1537,7 +1561,7 @@ export async function galleyExport(
       }
 
       if (args.outDir) {
-        const omitSheetSuffix = packet.sheetOrder.length === 1 || (targetIds.length === 1 && sid === 's1')
+        const omitSheetSuffix = packet.sheetOrder.length === 1
         const filename = omitSheetSuffix ? `${slug}.${args.format}` : `${slug}-${sid}.${args.format}`
         const relPath = `galley-exports/${filename}`
         writeFileSync(join(args.outDir, relPath), bytes)
@@ -1599,6 +1623,7 @@ function toMarkdown(sheet: GalleySheet, locale?: GalleyLocale): string {
     if (b.type === 'header') {
       const f = b.fields ?? { titel: '' }
       const meta: string[] = []
+      if (f.subtitle) meta.push(f.subtitle)
       if (f.fach) meta.push(isDe ? `Fach: ${f.fach}` : f.fach)
       if (f.klasse) meta.push(f.klasse.includes(':') ? f.klasse : `${pStr.groupPrefix}${f.klasse}`)
       if (f.datum) meta.push(isDe ? `Datum: ${f.datum}` : f.datum)

@@ -178,22 +178,41 @@ export class GalleyServiceRegistry {
     // 2. Tasks without a linked answer on multi-sheet packets (e.g. Problem Sheet + Answer Key)
     if (packet.sheetOrder.length >= 2) {
       const answeredTaskIds = new Set<BlockId>()
+      let hasAnyAnswerBlock = false
       for (const sid of packet.sheetOrder) {
         for (const b of packet.sheets[sid]?.blocks ?? []) {
           if (b.type === 'answer') {
+            hasAnyAnswerBlock = true
             for (const dep of b.dependsOn ?? []) answeredTaskIds.add(dep.id)
           }
         }
       }
-      const primarySid = packet.sheetOrder[0]
-      for (const b of packet.sheets[primarySid]?.blocks ?? []) {
-        if (b.type === 'task' && !answeredTaskIds.has(b.id)) {
+      const sheetsToScan = hasAnyAnswerBlock ? packet.sheetOrder : [packet.sheetOrder[0]]
+      for (const sid of sheetsToScan) {
+        for (const b of packet.sheets[sid]?.blocks ?? []) {
+          if (b.type === 'task' && !answeredTaskIds.has(b.id)) {
+            warnings.push({
+              code: 'GALLEY_UNANSWERED_TASK',
+              severity: 'info',
+              sheetId: sid,
+              blockId: b.id,
+              message: pf.unansweredTask(b.id),
+            })
+          }
+        }
+      }
+    }
+
+    // 2b. Unsupported keys passed on `header.fields` (surfaced instead of silent drop)
+    for (const sid of packet.sheetOrder) {
+      for (const b of packet.sheets[sid]?.blocks ?? []) {
+        if (b.type === 'header' && Array.isArray(b.fields?._unknownKeys) && b.fields._unknownKeys.length > 0) {
           warnings.push({
-            code: 'GALLEY_UNANSWERED_TASK',
-            severity: 'info',
-            sheetId: primarySid,
+            code: 'GALLEY_UNKNOWN_HEADER_FIELD',
+            severity: 'warn',
+            sheetId: sid,
             blockId: b.id,
-            message: pf.unansweredTask(b.id),
+            message: pf.unknownHeaderFields(b.id, b.fields._unknownKeys),
           })
         }
       }

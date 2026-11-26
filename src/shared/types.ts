@@ -9,7 +9,7 @@ import type { GalleyLocale } from './i18n.ts'
 export type { GalleyLocale }
 
 export const PLUGIN = 'dsh-galley'
-export const VERSION = '0.2.0'
+export const VERSION = '0.2.1'
 export const HEALTH_ROUTE = '/api/galley/health'
 export const STATE_ROUTE = '/api/galley/state'
 export const EDIT_ROUTE = '/api/galley/edit'
@@ -106,7 +106,15 @@ interface BlockBase {
 
 export interface HeaderBlock extends BlockBase {
   type: 'header'
-  fields: { titel: string; fach?: string; klasse?: string; datum?: string; name?: string }
+  fields: {
+    titel: string
+    subtitle?: string
+    fach?: string
+    klasse?: string
+    datum?: string
+    name?: string
+    _unknownKeys?: string[]
+  }
 }
 export interface HeadingBlock extends BlockBase {
   type: 'heading'

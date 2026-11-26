@@ -122,7 +122,7 @@ function plainInlineText(inlines: Inline[] | undefined): string {
 export function flattenBlockPreview(block: Block, maxChars = 60): string {
   if (block.type === 'header') {
     const f = block.fields ?? ({} as HeaderBlock['fields'])
-    const joined = [f.titel, f.fach, f.klasse, f.datum].filter(Boolean).join(' · ')
+    const joined = [f.titel, f.subtitle, f.fach, f.klasse, f.datum].filter(Boolean).join(' · ')
     return (joined || 'Header').slice(0, maxChars)
   }
   if (block.type === 'table') {
@@ -196,7 +196,7 @@ export interface BlockDraftBuffer {
   remoteHash?: string
   // Editable fields across the 8 block types:
   markup: string
-  headerFields: { titel: string; fach: string; klasse: string; datum: string; name: string }
+  headerFields: { titel: string; subtitle: string; fach: string; klasse: string; datum: string; name: string }
   headerShowNameLine: boolean
   headingLevel: 1 | 2 | 3
   headingNumbered: boolean
@@ -218,7 +218,7 @@ export function blockToDraftBuffer(block: Block): BlockDraftBuffer {
     dirty: false,
     conflict: false,
     markup: '',
-    headerFields: { titel: '', fach: '', klasse: '', datum: '', name: '' },
+    headerFields: { titel: '', subtitle: '', fach: '', klasse: '', datum: '', name: '' },
     headerShowNameLine: true,
     headingLevel: 1,
     headingNumbered: false,
@@ -236,6 +236,7 @@ export function blockToDraftBuffer(block: Block): BlockDraftBuffer {
     case 'header':
       base.headerFields = {
         titel: block.fields?.titel ?? '',
+        subtitle: block.fields?.subtitle ?? '',
         fach: block.fields?.fach ?? '',
         klasse: block.fields?.klasse ?? '',
         datum: block.fields?.datum ?? '',
@@ -346,6 +347,9 @@ export function draftBufferToPatch(draft: BlockDraftBuffer): Record<string, unkn
         fach: draft.headerFields.fach,
         klasse: draft.headerFields.klasse,
         datum: draft.headerFields.datum,
+      }
+      if (draft.headerFields.subtitle.trim().length > 0) {
+        f.subtitle = draft.headerFields.subtitle
       }
       if (draft.headerShowNameLine) {
         f.name = draft.headerFields.name

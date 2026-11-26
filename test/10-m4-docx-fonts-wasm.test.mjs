@@ -19,6 +19,8 @@ import { join } from 'node:path'
 import {
   GalleyStore,
   galleyOpen,
+  galleyStatus,
+  galleyReadBlock,
   galleyEditBlock,
   galleyExport,
   unpackDocxEntries,
@@ -483,3 +485,90 @@ test('M4.2: Bundled SIL-OFL-1.1 fonts + 100% offline WasmArm parity (fetch poiso
     else process.env.GALLEY_TYPST_ARM = prevEnv
   }
 })
+
+test('M4.0.1 dogfood polish: subtitle + fach preserved, unknown header keys warned, y-clustered table lines & -s1 export symmetry', async () => {
+  const opened = await galleyOpen(deps, {
+    template: 'worksheet',
+    title: 'Dogfood Polish Gate',
+  })
+  assert.equal(opened.ok, true)
+  const pid = opened.packetId
+
+  // 1. Patch header `b1` with simultaneous `fach` + `subtitle` + an unknown key `kursleiter`
+  const patched = await galleyEditBlock(deps, {
+    packetId: pid,
+    sheetId: 's1',
+    op: 'patch',
+    origin: 'agent',
+    blockId: 'b1',
+    patch: {
+      fields: {
+        titel: 'Industrialisierung',
+        subtitle: 'Das Ruhrgebiet im 19. Jahrhundert · Doppelstunde (90 Min.)',
+        fach: 'Geschichte',
+        klasse: '9b',
+        name: '',
+        kursleiter: 'Dr. Weber',
+      },
+    },
+  })
+  assert.equal(patched.ok, true)
+
+  const readB1 = await galleyReadBlock(deps, { packetId: pid, blockId: 'b1' })
+  assert.equal(readB1.ok, true)
+  assert.equal(readB1.blocks[0].block.fields.fach, 'Geschichte')
+  assert.equal(
+    readB1.blocks[0].block.fields.subtitle,
+    'Das Ruhrgebiet im 19. Jahrhundert · Doppelstunde (90 Min.)',
+    'subtitle must never be silently dropped when fach is also provided',
+  )
+
+  // Unknown key `kursleiter` surfaces as a preflight warning instead of vanishing silently
+  const status = await galleyStatus(deps, { packetId: pid })
+  assert.equal(status.ok, true)
+  assert.ok(
+    status.preflight.some((w) => w.code === 'GALLEY_UNKNOWN_HEADER_FIELD' && w.message.includes('kursleiter')),
+    `expected GALLEY_UNKNOWN_HEADER_FIELD preflight warning, got ${JSON.stringify(status.preflight)}`,
+  )
+
+  // Subtitle + fach both render in .typ, .md, and .docx
+  const typExp = await galleyExport(deps, { packetId: pid, sheetId: 's1', format: 'typ' })
+  assert.match(typExp.text, /Doppelstunde \(90 Min\.\)/)
+  assert.match(typExp.text, /Geschichte/)
+
+  const mdExp = await galleyExport(deps, { packetId: pid, sheetId: 's1', format: 'md' })
+  assert.match(mdExp.text, /Doppelstunde \(90 Min\.\)/)
+  assert.match(mdExp.text, /Geschichte/)
+
+  const docxSingleS1 = await galleyExport(deps, { packetId: pid, sheetId: 's1', format: 'docx', outDir: workspaceDir })
+  assert.equal(docxSingleS1.ok, true)
+  // 2. Multi-sheet `s1` single-sheet export uses `-s1` suffix consistently (no orphan duplicate file)
+  assert.equal(docxSingleS1.files[0].path, 'galley-exports/dogfood-polish-gate-s1.docx')
+  const docxDocXml = unpackDocxEntries(docxSingleS1.bytes)['word/document.xml'].toString('utf8')
+  assert.match(docxDocXml, /Doppelstunde \(90 Min\.\)/)
+  assert.match(docxDocXml, /Geschichte/)
+
+  // 3. Y-clustered `lastPageLineCount` on a 6-column landscape table:
+  //    1 sheet title + 1 header row + 2 data rows = 4 physical visual lines (NOT 19 text spans!)
+  const tblPacket = await galleyOpen(deps, {
+    title: 'Landscape Table Lines',
+    orientation: 'landscape',
+    blocks: [
+      {
+        type: 'table',
+        headers: ['Zeit', 'Phase', 'Ablauf', 'Material', 'Ziel', 'Notizen'],
+        rows: [
+          ['0–10', 'Einstieg', 'Impulsbild zeigen', 'Beamer', 'Fokus wecken', ''],
+          ['10–30', 'Erarbeitung', 'Partnerarbeit an Quelle', 'AB 1', 'Belege finden', ''],
+        ],
+      },
+    ],
+  })
+  assert.equal(tblPacket.ok, true)
+  assert.equal(
+    tblPacket.proofs.s1.lastPageLineCount,
+    4,
+    `expected 4 y-clustered visual lines (title + 3 table rows), got ${tblPacket.proofs.s1.lastPageLineCount}`,
+  )
+})
+

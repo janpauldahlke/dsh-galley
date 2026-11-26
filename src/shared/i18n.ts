@@ -36,6 +36,7 @@ export interface GalleyPreflightStrings {
   unansweredTask: (blockId: string) => string
   pageOverflow: (sheetTitle: string, target: number | string, overflow: number) => string
   sourceLineWrap: (blockId: string, lineNum: number, charLen: number) => string
+  unknownHeaderFields: (blockId: string, keys: string[]) => string
 }
 
 export interface GalleyUiStrings {
@@ -83,6 +84,8 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
         `Sheet "${title}" exceeds target (${target}p) by +${overflow} lines`,
       sourceLineWrap: (id, line, len) =>
         `Source text ${id}: line ${line} (${len} chars) may soft-wrap and shift marginal line numbers`,
+      unknownHeaderFields: (id, keys) =>
+        `Header ${id} ignored unsupported field(s): ${keys.join(', ')} (supported: title, subtitle, subject/fach, meta/klasse, date/datum, name)`,
     },
     ui: {
       packet: 'Packet',
@@ -124,6 +127,8 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
         `Bogen "${title}" überschreitet Ziel (${target} S.) um +${overflow} Zeilen`,
       sourceLineWrap: (id, line, len) =>
         `Quellentext ${id}: Zeile ${line} (${len} Zeichen) bricht ggf. um und verschiebt nachfolgende Randzeilennummern`,
+      unknownHeaderFields: (id, keys) =>
+        `Kopfbereich ${id} ignoriert unbekannte Felder: ${keys.join(', ')} (unterstützt: title/titel, subtitle/untertitel, subject/fach, meta/klasse, date/datum, name)`,
     },
     ui: {
       packet: 'Mappe',

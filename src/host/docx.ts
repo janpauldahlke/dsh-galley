@@ -702,12 +702,23 @@ function renderBlockCoreXml(ctx: SheetBuildContext, block: Block, availTwips: nu
         rowsXml.push(`<w:tr>${lblCell}${valCell}</w:tr>`)
       }
 
-      // If no metadata fields exist at all, still emit a clean borderless 2-col header row for `titel`.
+      // Emit title (+ optional subtitle) banner above the borderless 2-col metadata table.
       const parts: string[] = []
-      if (f.titel) {
-        parts.push(
-          `<w:p><w:pPr><w:spacing w:before="0" w:after="80"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="AAAAAA"/></w:pBdr></w:pPr>${renderTextRun(f.titel, { bold: true, sizeHalfPt: 32 })}</w:p>`,
-        )
+      if (f.titel || f.subtitle) {
+        const hasSub = Boolean(f.subtitle && f.subtitle.trim().length > 0)
+        if (f.titel) {
+          const bdrXml = !hasSub
+            ? '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="AAAAAA"/></w:pBdr>'
+            : ''
+          parts.push(
+            `<w:p><w:pPr><w:spacing w:before="0" w:after="${hasSub ? 20 : 80}"/>${bdrXml}</w:pPr>${renderTextRun(f.titel, { bold: true, sizeHalfPt: 32 })}</w:p>`,
+          )
+        }
+        if (hasSub) {
+          parts.push(
+            `<w:p><w:pPr><w:spacing w:before="0" w:after="80"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="AAAAAA"/></w:pBdr></w:pPr>${renderTextRun(f.subtitle!, { colorHex: '555555', sizeHalfPt: 21 })}</w:p>`,
+          )
+        }
       }
       if (rowsXml.length > 0) {
         parts.push(

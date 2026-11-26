@@ -318,6 +318,7 @@ export function blockTypst(
       const right = `[${meta.length ? meta.join('#linebreak()') : ''}]`
       const left: string[] = [`#text(size: 8pt, fill: luma(110), ${typString(pStr.headerEyebrow)})`]
       if (f.titel) left.push(`#text(size: 17pt, weight: "bold", ${typString(f.titel)})`)
+      if (f.subtitle) left.push(`#text(size: 10.5pt, fill: luma(85), ${typString(f.subtitle)})`)
       if (f.name !== undefined) {
         const nameVal = f.name.trim() ? f.name : '________________________'
         left.push(`#text(size: 9pt, fill: luma(110), ${typString(pStr.namePrefix + nameVal)})`)
@@ -609,13 +610,50 @@ export function clusterLines(ys: number[], tol = 2.5): number[] {
   return out
 }
 
+function countVisualLinesInSvgSlice(svgSlice: string): number {
+  const re = /<(\/?)g\b((?:"[^"]*"|'[^']*'|[^"'>])*)\/?>/g
+  const stack: { ay: number; sy: number }[] = []
+  const textYs: number[] = []
+  let m: RegExpExecArray | null
+  while ((m = re.exec(svgSlice)) !== null) {
+    const closing = m[1] === '/'
+    const attrs = m[2] || ''
+    const selfClose = /\/\s*>$/.test(m[0])
+    if (closing) {
+      stack.pop()
+      continue
+    }
+    let y = 0
+    let sy = 1
+    // Ignore the outer `<g class="typst-page" transform="translate(0, pageY)">` offset so
+    // coordinates stay page-local.
+    const isPageRoot = /\bclass="typst-page"/.test(attrs)
+    const tr = !isPageRoot ? attrs.match(/transform="([^"]*)"/) : null
+    if (tr) {
+      const t = tr[1].match(/translate\(([-\d.]+)[,\s]+([-\d.]+)\)/)
+      const sc = tr[1].match(/scale\(([-\d.]+)[,\s]+([-\d.]+)\)/)
+      if (t) y = +t[2]
+      if (sc) sy = +sc[2]
+    }
+    const parent = stack[stack.length - 1]
+    const ay = (parent ? parent.ay : 0) + (parent ? parent.sy : 1) * y
+    if (/\bclass="typst-text"/.test(attrs)) {
+      textYs.push(Math.round(ay * 100) / 100)
+    }
+    if (!selfClose) {
+      stack.push({ ay, sy: (parent ? parent.sy : 1) * sy })
+    }
+  }
+  return clusterLines(textYs, 2.5).length
+}
+
 /**
- * Robust page-aware SVG parse (M1 fix). Typst's stacked SVG wraps each page in
- * `<g class="typst-page" transform="translate(x, y)">`; these groups are
- * sequential and non-overlapping, so an element's page index = the count of
- * `typst-page` starts at/before its byte offset, minus 1. No transform math —
- * immune to the nested scale/translate in `outline_glyph` paths that made the
- * old absolute-y walk diverge on multi-page output.
+ * Robust page-aware SVG parse (M1 + M4.0.1 y-clustered line tally).
+ * Typst's stacked SVG wraps each page in `<g class="typst-page" transform="translate(x, y)">`;
+ * these groups are sequential and non-overlapping, so an anchor's page index = count of
+ * `typst-page` starts at/before its byte offset, minus 1. Within each page segment,
+ * `<g class="typst-text">` runs are y-clustered (`tol = 2.5pt`) so multi-column table rows
+ * and inline bold/italic spans count as 1 physical visual line rather than N text spans.
  */
 export function parseSvgPages(svg: string): {
   pageCount: number
@@ -632,16 +670,26 @@ export function parseSvgPages(svg: string): {
     for (const s of pageStarts) if (s <= off) n++
     return Math.max(0, Math.min(pageCount - 1, n - 1))
   }
+
   const linesPerPage = new Array<number>(pageCount).fill(0)
+  if (pageStarts.length === 0) {
+    linesPerPage[0] = countVisualLinesInSvgSlice(svg)
+  } else {
+    const closeSvg = svg.lastIndexOf('</svg>')
+    const endBound = closeSvg > pageStarts[0] ? closeSvg : svg.length
+    for (let p = 0; p < pageStarts.length; p++) {
+      const start = pageStarts[p]
+      const end = p + 1 < pageStarts.length ? pageStarts[p + 1] : endBound
+      linesPerPage[p] = countVisualLinesInSvgSlice(svg.slice(start, end))
+    }
+  }
+
   const anchors: { hex: string; page: number }[] = []
-  const tagRe = /<([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^"'>])*)>/g
+  const pathRe = /<path\b((?:"[^"]*"|'[^']*'|[^"'>])*)>/g
   let tm: RegExpExecArray | null
-  while ((tm = tagRe.exec(svg)) !== null) {
-    const name = tm[1]
-    const attrs = tm[2] || ''
-    if (name === 'g' && /class="typst-text"/.test(attrs)) {
-      linesPerPage[pageOf(tm.index)]++
-    } else if (name === 'path' && /class="typst-shape"/.test(attrs)) {
+  while ((tm = pathRe.exec(svg)) !== null) {
+    const attrs = tm[1] || ''
+    if (/class="typst-shape"/.test(attrs)) {
       const fill = attrs.match(/fill="([^"]+)"/)
       if (fill) anchors.push({ hex: fill[1], page: pageOf(tm.index) })
     }

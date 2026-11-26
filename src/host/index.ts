@@ -400,7 +400,7 @@ export function registerGalleyTools(ctx: Context): () => void {
       '(2) `task` auto-prepends "Task N" (or "Aufgabe N" when packet locale is "de") unless `body` already starts with a numbered prefix. ' +
       '(3) `dependsOn: ["b2"]` accepts block ID strings on both `insert` and `patch` (auto-snapshots `sinceHash`). ' +
       '(4) `table` accepts 2D strings with mini-markup (`headers: ["Col A","Col B"]`, `rows: [["1", "**Bold**"]]`) + optional `colWidths` (`["20%","80%"]`). ' +
-      '(5) `header.fields`: accepts `{ title, subtitle, meta, date, name }` (or `{ titel, fach, klasse, datum, name }`); pass `name: ""` for a blank fill-in line, or omit `name` when not needed.',
+      '(5) `header.fields`: accepts `{ title, subtitle, subject, meta, date, name }` (or `{ titel, untertitel, fach, klasse, datum, name }`); pass `name: ""` for a blank fill-in line, or omit `name` when not needed.',
     parameters: {
       type: 'object',
       additionalProperties: false,

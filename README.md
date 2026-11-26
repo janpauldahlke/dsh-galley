@@ -1,6 +1,6 @@
 # dsh-galley
 
-> **Status:** `0.2.0` — Deterministic `.pdf` / `.docx` / `.typ` / `.tex` / `.md` Exporters, Offline SIL-OFL-1.1 Fonts + WASM Fallback Parity, KV-Cache-Safe Agent Delta Inject & `ctx.galley` Service
+> **Status:** `0.2.1` — Deterministic `.pdf` / `.docx` / `.typ` / `.tex` / `.md` Exporters, Offline SIL-OFL-1.1 Fonts + WASM Fallback Parity, KV-Cache-Safe Agent Delta Inject & `ctx.galley` Service
 
 Shared volatile **document workbench & typesetter** for human + agent co-authoring
 in the **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) web and desktop UI.

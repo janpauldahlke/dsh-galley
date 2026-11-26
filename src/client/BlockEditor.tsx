@@ -319,7 +319,8 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
           </div>
           {(
             [
-              { key: 'fach', label: 'Subtitle / Subject' },
+              { key: 'subtitle', label: 'Subtitle' },
+              { key: 'fach', label: 'Subject' },
               { key: 'klasse', label: 'Group / Meta' },
               { key: 'datum', label: 'Date' },
             ] as const
