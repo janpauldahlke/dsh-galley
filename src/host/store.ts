@@ -94,6 +94,7 @@ export function blockContentProjection(block: Block): Record<string, unknown> {
   if (b.numbered !== undefined) out.numbered = b.numbered
   if (b.headers !== undefined) out.headers = b.headers
   if (b.rows !== undefined) out.rows = b.rows
+  if (b.colWidths !== undefined) out.colWidths = b.colWidths
   if (b.tone !== undefined) out.tone = b.tone
   if (b.title !== undefined) out.title = b.title
   if (b.lineNumbers !== undefined) out.lineNumbers = b.lineNumbers

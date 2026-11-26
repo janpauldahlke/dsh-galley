@@ -192,6 +192,7 @@ export interface BlockDraftBuffer {
   // Editable fields across the 8 block types:
   markup: string
   headerFields: { titel: string; fach: string; klasse: string; datum: string; name: string }
+  headerShowNameLine: boolean
   headingLevel: 1 | 2 | 3
   headingNumbered: boolean
   sourceTitle: string
@@ -213,6 +214,7 @@ export function blockToDraftBuffer(block: Block): BlockDraftBuffer {
     conflict: false,
     markup: '',
     headerFields: { titel: '', fach: '', klasse: '', datum: '', name: '' },
+    headerShowNameLine: true,
     headingLevel: 1,
     headingNumbered: false,
     sourceTitle: '',
@@ -234,6 +236,7 @@ export function blockToDraftBuffer(block: Block): BlockDraftBuffer {
         datum: block.fields?.datum ?? '',
         name: block.fields?.name ?? '',
       }
+      base.headerShowNameLine = block.fields?.name !== undefined
       break
     case 'heading':
       base.headingLevel = block.level ?? 1
@@ -332,9 +335,19 @@ export function draftBufferToPatch(draft: BlockDraftBuffer): Record<string, unkn
   patch.dependsOn = draft.dependsOnIds
 
   switch (draft.blockType) {
-    case 'header':
-      patch.fields = { ...draft.headerFields }
+    case 'header': {
+      const f: Record<string, string> = {
+        titel: draft.headerFields.titel,
+        fach: draft.headerFields.fach,
+        klasse: draft.headerFields.klasse,
+        datum: draft.headerFields.datum,
+      }
+      if (draft.headerShowNameLine) {
+        f.name = draft.headerFields.name
+      }
+      patch.fields = f
       break
+    }
     case 'heading':
       patch.level = draft.headingLevel
       patch.numbered = draft.headingNumbered

@@ -213,7 +213,33 @@ export class GalleyServiceRegistry {
       }
     }
 
-    // 4. Companion leaf-plugin checks (fail-open so a third-party check never breaks the host)
+    // 4. Long hard-broken lines in numbered `source_text` blocks (wrap shifts gutter numbers)
+    for (const sid of packet.sheetOrder) {
+      const sh = packet.sheets[sid]
+      if (!sh) continue
+      for (const b of sh.blocks) {
+        if (b.type === 'source_text' && b.lineNumbers) {
+          const flat = (b.body ?? [])
+            .map((n) => (n.t === 'newline' ? '\n' : 'v' in n && typeof n.v === 'string' ? n.v : ''))
+            .join('')
+          const logicalLines = flat.split('\n')
+          if (logicalLines.length > 1) {
+            const overIdx = logicalLines.findIndex((l) => l.length > 92)
+            if (overIdx >= 0) {
+              warnings.push({
+                code: 'GALLEY_SOURCE_LINE_WRAP',
+                severity: 'info',
+                sheetId: sid,
+                blockId: b.id,
+                message: `Quellentext ${b.id}: Zeile ${overIdx + 1} (${logicalLines[overIdx].length} Zeichen) bricht ggf. um und verschiebt nachfolgende Randzeilennummern`,
+              })
+            }
+          }
+        }
+      }
+    }
+
+    // 5. Companion leaf-plugin checks (fail-open so a third-party check never breaks the host)
     for (const [, fn] of this.preflightChecks) {
       try {
         const extra = fn(packet, cwd)

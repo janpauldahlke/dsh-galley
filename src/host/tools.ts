@@ -52,6 +52,9 @@ import {
   noteGalleyCwd,
   resolveGalleyCwd,
   resolveGalleyRoot,
+  setSessionActivePacket,
+  getSessionActivePacket,
+  clearSessionActivePacket,
   _resetGalleyWorkspaceForTests,
 } from './workspace.ts'
 
@@ -68,6 +71,9 @@ export {
   noteGalleyCwd,
   resolveGalleyCwd,
   resolveGalleyRoot,
+  setSessionActivePacket,
+  getSessionActivePacket,
+  clearSessionActivePacket,
   _resetGalleyWorkspaceForTests,
 }
 export type { GalleyService }
@@ -327,7 +333,11 @@ function isInlineObject(x: unknown): x is Inline {
  */
 function normalizeTableCell(rawCell: unknown): { cell: Inline[]; error: string | null } {
   if (rawCell === null || rawCell === undefined) return { cell: [], error: null }
-  if (typeof rawCell === 'string') return { cell: [{ t: 'text', v: rawCell }], error: null }
+  if (typeof rawCell === 'string') {
+    const parsed = parseInlines(rawCell)
+    const e = validateInline(parsed)
+    return e ? { cell: [], error: e } : { cell: parsed, error: null }
+  }
   if (isInlineObject(rawCell)) {
     const e = validateInline([rawCell])
     return e ? { cell: [], error: e } : { cell: [rawCell], error: null }
@@ -375,6 +385,22 @@ function normalizeTableRows(rawRows: unknown): { rows: Inline[][][]; error: stri
     rows.push(row)
   }
   return { rows, error: null }
+}
+
+function normalizeTableColWidths(rawWidths: unknown): { colWidths: (string | number)[] | undefined; error: string | null } {
+  if (rawWidths === undefined || rawWidths === null) return { colWidths: undefined, error: null }
+  if (!Array.isArray(rawWidths)) return { colWidths: undefined, error: 'invalid_block' }
+  const out: (string | number)[] = []
+  for (const w of rawWidths) {
+    if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
+      out.push(w)
+    } else if (typeof w === 'string' && /^(\d+(\.\d+)?(%|fr|pt|cm|mm|em)|auto)$/.test(w.trim())) {
+      out.push(w.trim())
+    } else {
+      return { colWidths: undefined, error: 'invalid_block' }
+    }
+  }
+  return { colWidths: out.length > 0 ? out : undefined, error: null }
 }
 
 /**
@@ -479,8 +505,11 @@ export function buildBlock(
       if (hRes.error) return { block: null as unknown as Block, error: hRes.error }
       const rRes = normalizeTableRows(raw.rows)
       if (rRes.error) return { block: null as unknown as Block, error: rRes.error }
+      const wRes = normalizeTableColWidths(raw.colWidths)
+      if (wRes.error) return { block: null as unknown as Block, error: wRes.error }
       base.headers = hRes.headers
       base.rows = rRes.rows
+      if (wRes.colWidths) base.colWidths = wRes.colWidths
       break
     }
     case 'callout':
@@ -495,12 +524,15 @@ export function buildBlock(
 
 // ── Proofs ──────────────────────────────────────────────────────────────────
 
-function toReceipt(sr: SheetRender, packet: GalleyPacket): SheetProofReceipt {
+function toReceipt(sr: SheetRender, packet: GalleyPacket, sheet?: GalleySheet): SheetProofReceipt {
+  const tp = sheet?.geometry?.targetPages
   return {
     pages: sr.pages,
     perPage: sr.perPage,
     lastPageLineCount: sr.lastPageLineCount,
     overflowLinesOnLastPage: sr.overflowLinesOnLastPage,
+    targetPages: tp ?? null,
+    targetPagesMet: tp !== undefined ? sr.pages <= tp : null,
     compiledAtRev: packet.rev,
   }
 }
@@ -524,9 +556,18 @@ async function computeProofs(
     }
     try {
       const sr = await render(sheet, packet, assetBytes)
-      out[sid] = toReceipt(sr, packet)
+      out[sid] = toReceipt(sr, packet, sheet)
     } catch {
-      out[sid] = { pages: 0, perPage: [], lastPageLineCount: 0, overflowLinesOnLastPage: 0, compiledAtRev: packet.rev }
+      const tp = sheet.geometry.targetPages
+      out[sid] = {
+        pages: 0,
+        perPage: [],
+        lastPageLineCount: 0,
+        overflowLinesOnLastPage: 0,
+        targetPages: tp ?? null,
+        targetPagesMet: tp !== undefined ? false : null,
+        compiledAtRev: packet.rev,
+      }
     }
   }
   return out
@@ -979,9 +1020,11 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
       const proofProp = renderProp
         ? await (async () => {
             try {
+              const propSheet = loadedProp.sheets[resolvedSheetId]
               return toReceipt(
-                await renderProp(loadedProp.sheets[resolvedSheetId], loadedProp, assetBytesForPacket(deps, loadedProp)),
+                await renderProp(propSheet, loadedProp, assetBytesForPacket(deps, loadedProp)),
                 loadedProp,
+                propSheet,
               )
             } catch {
               return null
@@ -1062,6 +1105,12 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
                 if (rRes.error) throw new StoreError(rRes.error, 'invalid table rows')
                 b.rows = rRes.rows
                 contentTouched = true
+              } else if (k === 'colWidths') {
+                const wRes = normalizeTableColWidths(v)
+                if (wRes.error) throw new StoreError(wRes.error, 'invalid table colWidths')
+                if (wRes.colWidths) b.colWidths = wRes.colWidths
+                else delete b.colWidths
+                contentTouched = true
               } else if (['fields', 'level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
                 b[k] = v
                 contentTouched = true
@@ -1121,7 +1170,12 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
     const proof = render
       ? await (async () => {
           try {
-            return toReceipt(await render(loaded.sheets[touchedSheetId], loaded, assetBytesForPacket(deps, loaded)), loaded)
+            const touchedSheet = loaded.sheets[touchedSheetId]
+            return toReceipt(
+              await render(touchedSheet, loaded, assetBytesForPacket(deps, loaded)),
+              loaded,
+              touchedSheet,
+            )
           } catch {
             return null
           }
@@ -1206,8 +1260,16 @@ export interface ExportArgs {
   outDir?: string
 }
 
-function exportSlug(title: string): string {
-  const s = title
+export function exportSlug(title: string): string {
+  const de = title
+    .replace(/ä/g, 'ae')
+    .replace(/ö/g, 'oe')
+    .replace(/ü/g, 'ue')
+    .replace(/Ä/g, 'Ae')
+    .replace(/Ö/g, 'Oe')
+    .replace(/Ü/g, 'Ue')
+    .replace(/ß/g, 'ss')
+  const s = de
     .normalize('NFKD')
     .replace(/[^\w\s-]/g, '')
     .trim()
@@ -1290,7 +1352,8 @@ export async function galleyExport(
       }
 
       if (args.outDir) {
-        const filename = targetIds.length === 1 && sid === 's1' ? `${slug}.${args.format}` : `${slug}-${sid}.${args.format}`
+        const omitSheetSuffix = packet.sheetOrder.length === 1 || (targetIds.length === 1 && sid === 's1')
+        const filename = omitSheetSuffix ? `${slug}.${args.format}` : `${slug}-${sid}.${args.format}`
         const relPath = `galley-exports/${filename}`
         writeFileSync(join(args.outDir, relPath), bytes)
         files.push({

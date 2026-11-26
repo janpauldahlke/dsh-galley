@@ -30,7 +30,12 @@ import { renderTypstSource, type GalleyBlock } from '../typst/index.ts'
 import { createPrimaryArm, type Arm } from './arms/index.ts'
 import { registerGalleyRoutes } from './routes.ts'
 import { defaultGalleyRegistry, GalleyServiceRegistry, type GalleyService } from './service.ts'
-import { getStoreForCwd, resolveGalleyCwd } from './workspace.ts'
+import {
+  getStoreForCwd,
+  resolveGalleyCwd,
+  setSessionActivePacket,
+  getSessionActivePacket,
+} from './workspace.ts'
 import {
   galleyOpen,
   galleyStatus,
@@ -155,9 +160,15 @@ function renderJson(_args: unknown, value: unknown): Array<{ type: 'text'; text:
 type ExecLike = {
   agent?: {
     session?: {
-      header?: { cwd?: string }
+      id?: string
+      header?: { id?: string; cwd?: string }
     }
   }
+}
+
+function sessionIdOf(exec?: ExecLike): string | null {
+  const sid = exec?.agent?.session?.id ?? exec?.agent?.session?.header?.id
+  return typeof sid === 'string' && sid.trim() ? sid.trim() : null
 }
 
 let armPromise: Promise<Arm> | null = null
@@ -186,12 +197,26 @@ async function getDepsForCwd(cwdParam?: string | null): Promise<{
   }
 }
 
-async function getToolDeps(args: Record<string, unknown>, exec?: ExecLike): Promise<GalleyToolsDeps> {
+async function getToolContext(args: Record<string, unknown>, exec?: ExecLike): Promise<{
+  deps: GalleyToolsDeps
+  root: string
+  sessionId: string | null
+  effectivePacketId: string | undefined
+}> {
   const explicitCwd = typeof args.cwd === 'string' ? args.cwd : undefined
   const sessionCwd = exec?.agent?.session?.header?.cwd
   const resolved = resolveGalleyCwd(explicitCwd, sessionCwd)
-  const { deps } = await getDepsForCwd(resolved)
-  return deps
+  const { deps, root } = await getDepsForCwd(resolved)
+  const sessionId = sessionIdOf(exec)
+
+  let effectivePacketId = typeof args.packetId === 'string' ? args.packetId : undefined
+  if (effectivePacketId === undefined && sessionId) {
+    const pinned = getSessionActivePacket(root, sessionId)
+    if (pinned && deps.store.load(pinned)) {
+      effectivePacketId = pinned
+    }
+  }
+  return { deps, root, sessionId, effectivePacketId }
 }
 
 /** Register the six M1 tools (tools face). */
@@ -256,8 +281,13 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
+        const { deps, root, sessionId } = await getToolContext(args, exec)
         const a = args.id !== undefined ? args : { ...args, origin: 'agent' }
-        return await galleyOpen(await getToolDeps(args, exec), (a as unknown as Parameters<typeof galleyOpen>[1]))
+        const res = await galleyOpen(deps, a as unknown as Parameters<typeof galleyOpen>[1])
+        if (res.ok && sessionId) {
+          setSessionActivePacket(root, sessionId, res.packetId)
+        }
+        return res
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -268,7 +298,7 @@ export function registerGalleyTools(ctx: Context): () => void {
     name: 'galley_status',
     description:
       'Report a packet’s current revision, block outlines (never full bodies), pending proposals / ' +
-      'unresolved annotations, and a fresh proof receipt per sheet. Omit packetId to use the active packet.',
+      'unresolved annotations, preflight warnings, and per-sheet proofs (incl. targetPagesMet). Omit packetId to use the active packet.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -284,7 +314,9 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        return await galleyStatus(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyStatus>[1]))
+        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const a = effectivePacketId !== undefined ? { ...args, packetId: effectivePacketId } : args
+        return await galleyStatus(deps, a as unknown as Parameters<typeof galleyStatus>[1])
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -309,7 +341,9 @@ export function registerGalleyTools(ctx: Context): () => void {
     output: out({ ok: { type: 'boolean' }, packetId: { type: 'string' }, blocks: { type: 'array', items: { type: 'object', additionalProperties: true } } }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        return await galleyReadBlock(await getToolDeps(args, exec), (args as unknown as Parameters<typeof galleyReadBlock>[1]))
+        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const a = effectivePacketId !== undefined ? { ...args, packetId: effectivePacketId } : args
+        return await galleyReadBlock(deps, a as unknown as Parameters<typeof galleyReadBlock>[1])
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -320,13 +354,14 @@ export function registerGalleyTools(ctx: Context): () => void {
     name: 'galley_edit_block',
     description:
       'The single writer: insert / patch / move / remove one block (spec 02 §4.4). ' +
-      'patch + remove + move require blockId + baseHash (optimistic lock). A human patch records a pending proposal.',
+      'Notes: `task` auto-prepends "Aufgabe N"; `table` cells accept simple 2D strings with mini-markup (`headers: ["Zeit","Phase"]`, `rows: [["10m", "**Einstieg** – Thema"]]`) or Inline[], plus optional `colWidths` (`["15%","85%"]`); ' +
+      '`header.fields.name`: omit `name` on teacher-only sheets, pass `name: ""` for a student fill-in line.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         cwd: { type: 'string', description: 'Optional project working directory (defaults to session cwd).' },
-        packetId: { type: 'string', description: 'Omit to use the active packet.' },
+        packetId: { type: 'string', description: 'Omit to use the session-sticky active packet.' },
         sheetId: { type: 'string', description: 'Optional: auto-resolved from blockId or active sheet when omitted.' },
         op: { type: 'string', enum: ['insert', 'patch', 'move', 'remove'] },
         beforeId: { type: 'string' },
@@ -349,8 +384,13 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const a = { ...(args as Record<string, unknown>), origin: 'agent' }
-        return await galleyEditBlock(await getToolDeps(args, exec), (a as unknown as Parameters<typeof galleyEditBlock>[1]))
+        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const a = {
+          ...(args as Record<string, unknown>),
+          ...(effectivePacketId !== undefined ? { packetId: effectivePacketId } : {}),
+          origin: 'agent',
+        }
+        return await galleyEditBlock(deps, a as unknown as Parameters<typeof galleyEditBlock>[1])
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -359,7 +399,8 @@ export function registerGalleyTools(ctx: Context): () => void {
 
   register({
     name: 'galley_annotate',
-    description: 'Add / list / resolve / unresolve a margin note (Randnotiz) anchored to a block.',
+    description:
+      'Add / list / resolve / unresolve a non-printing margin note (Randnotiz) anchored to a block (shown in the Galley pane, never printed on the PDF).',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -376,8 +417,13 @@ export function registerGalleyTools(ctx: Context): () => void {
     output: out({ ok: { type: 'boolean' }, annotations: { type: 'array', items: { type: 'object', additionalProperties: true } } }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const a = { ...args, author: 'agent' }
-        return await galleyAnnotate(await getToolDeps(args, exec), (a as unknown as Parameters<typeof galleyAnnotate>[1]))
+        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const a = {
+          ...args,
+          ...(effectivePacketId !== undefined ? { packetId: effectivePacketId } : {}),
+          author: 'agent',
+        }
+        return await galleyAnnotate(deps, a as unknown as Parameters<typeof galleyAnnotate>[1])
       } catch (error) {
         return toolErrorResult(error)
       }
@@ -387,8 +433,8 @@ export function registerGalleyTools(ctx: Context): () => void {
   register({
     name: 'galley_export',
     description:
-      'Export a sheet to typ / md / tex (pure) or pdf (via the render arm). ' +
-      'Omit packetId to use the active packet. docx is not available until M4 (fails with GALLEY_EXPORT_FAILED).',
+      'Export sheets to typ / md / tex (pure) or pdf (via the render arm), writing deliverables into <cwd>/galley-exports/. ' +
+      'Omit packetId to use the active packet. docx lands in M4 (currently GALLEY_EXPORT_FAILED).',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -408,15 +454,13 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const deps = await getToolDeps(args, exec)
+        const { deps, effectivePacketId } = await getToolContext(args, exec)
         const exportArgs = {
           ...(args as unknown as Parameters<typeof galleyExport>[1]),
+          ...(effectivePacketId !== undefined ? { packetId: effectivePacketId } : {}),
           outDir: deps.cwd,
         }
         const res = await galleyExport(deps, exportArgs)
-        // DSH validates lossless JSON on the raw return value of `execute()` BEFORE
-        // `output.render` runs — strip raw Node `Buffer` (`bytes`) since `files[]`
-        // already carries the written `galley-exports/…` deliverable paths.
         if (res.ok && 'bytes' in res) {
           const { bytes: _omit, ...jsonSafe } = res
           return jsonSafe

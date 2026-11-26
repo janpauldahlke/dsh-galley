@@ -317,7 +317,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               }
             />
           </div>
-          {(['fach', 'klasse', 'datum', 'name'] as const).map((fieldKey) => (
+          {(['fach', 'klasse', 'datum'] as const).map((fieldKey) => (
             <div key={fieldKey}>
               <label style={{ fontSize: 11, opacity: 0.75, textTransform: 'capitalize' }}>{fieldKey}</label>
               <input
@@ -333,6 +333,30 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               />
             </div>
           ))}
+          <div>
+            <label style={{ fontSize: 11, opacity: 0.75, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <input
+                type="checkbox"
+                checked={draft.headerShowNameLine}
+                onChange={(e) => updateDraft((p) => ({ ...p, headerShowNameLine: e.target.checked }))}
+              />
+              Namenszeile (Schülerblatt)
+            </label>
+            {draft.headerShowNameLine && (
+              <input
+                aria-label="Header name"
+                placeholder="Leer = Ausfülllinie (Name: ____)"
+                style={inputStyle}
+                value={draft.headerFields.name}
+                onChange={(e) =>
+                  updateDraft((p) => ({
+                    ...p,
+                    headerFields: { ...p.headerFields, name: e.target.value },
+                  }))
+                }
+              />
+            )}
+          </div>
         </div>
       )}
 

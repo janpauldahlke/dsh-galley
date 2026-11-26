@@ -131,6 +131,8 @@ export interface TableBlock extends BlockBase {
   headers: Inline[][]
   /** Data rows; each row is a list of cells, each cell an inline run. */
   rows: Inline[][][]
+  /** Optional per-column widths, e.g. ['12%', '20%', '34%', '17%', '17%'] or [1, 2, 3] (fr). */
+  colWidths?: (string | number)[]
 }
 export interface CalloutBlock extends BlockBase {
   type: 'callout'
@@ -238,6 +240,10 @@ export interface SheetProofReceipt {
   perPage: { wPt: number; hPt: number }[]
   lastPageLineCount: number
   overflowLinesOnLastPage: number
+  /**Configured page budget (`null` when unbounded). */
+  targetPages?: number | null
+  /** Explicit boolean check: `pages <= targetPages` (`null` when unbounded). */
+  targetPagesMet?: boolean | null
   compiledAtRev: number
 }
 
@@ -314,6 +320,8 @@ export interface StateProofView {
   perPage: { wPt: number; hPt: number }[]
   lastPageLineCount: number
   overflowLinesOnLastPage: number
+  targetPages?: number | null
+  targetPagesMet?: boolean | null
   blockToPage: Record<BlockId, number>
   compiledAtRev: number
   /** Per-page SVG data URIs (`data:image/svg+xml;base64,…`), isolated for inline DOM mount. */

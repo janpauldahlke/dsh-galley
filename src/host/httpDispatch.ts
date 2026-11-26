@@ -42,7 +42,11 @@ import {
   type GalleyToolsDeps,
   type ToolFailure,
 } from './tools.ts'
-import { getStoreForCwd, noteGalleyCwd } from './workspace.ts'
+import {
+  clearSessionActivePacket,
+  getStoreForCwd,
+  noteGalleyCwd,
+} from './workspace.ts'
 
 const BODY_LIMIT_BYTES = 6 * 1024 * 1024 // 6 MB JSON envelope (allows ≤4 MB raw image asset in base64)
 const MAX_ASSET_BYTES = 4 * 1024 * 1024
@@ -186,6 +190,7 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
   for (const sid of packet.sheetOrder) {
     const sheet = packet.sheets[sid]
     if (!sheet) continue
+    const tp = sheet.geometry.targetPages
     if (!deps.render) {
       proofs.push({
         sheetId: sid,
@@ -193,6 +198,8 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
         perPage: [],
         lastPageLineCount: 0,
         overflowLinesOnLastPage: 0,
+        targetPages: tp ?? null,
+        targetPagesMet: tp !== undefined ? false : null,
         blockToPage: {},
         compiledAtRev: packet.rev,
         svgPages: [],
@@ -211,6 +218,8 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
         perPage: sr.perPage,
         lastPageLineCount: sr.lastPageLineCount,
         overflowLinesOnLastPage: sr.overflowLinesOnLastPage,
+        targetPages: tp ?? null,
+        targetPagesMet: tp !== undefined ? sr.pages <= tp : null,
         blockToPage: sr.blockToPage ?? {},
         compiledAtRev: packet.rev,
         svgPages,
@@ -226,6 +235,8 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
         perPage: [],
         lastPageLineCount: 0,
         overflowLinesOnLastPage: 0,
+        targetPages: tp ?? null,
+        targetPagesMet: tp !== undefined ? false : null,
         blockToPage: {},
         compiledAtRev: packet.rev,
         svgPages: [],
@@ -264,13 +275,11 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     const { store } = deps
     const packets = store.list()
 
+    // GET /api/galley/state is strictly read-only — never mutate store.active.json here.
     const explicitPid = url.searchParams.get('packetId')?.trim() || undefined
-    if (explicitPid) {
-      if (!store.load(explicitPid)) {
-        sendFailure(res, { ok: false, code: Err.PACKET_NOT_FOUND, message: `packet ${explicitPid} not found` })
-        return
-      }
-      store.setActivePacket(explicitPid)
+    if (explicitPid && !store.load(explicitPid)) {
+      sendFailure(res, { ok: false, code: Err.PACKET_NOT_FOUND, message: `packet ${explicitPid} not found` })
+      return
     }
 
     const activePid = explicitPid ?? store.getActivePacket()
@@ -291,7 +300,13 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
     }
 
     const revParam = url.searchParams.get('rev')
-    if (revParam !== null && revParam !== '' && Number(revParam) === packet.rev) {
+    const knownPacket = url.searchParams.get('knownPacket')?.trim()
+    if (
+      revParam !== null &&
+      revParam !== '' &&
+      Number(revParam) === packet.rev &&
+      (!knownPacket || knownPacket === packet.id)
+    ) {
       sendNotModified(res)
       return
     }
@@ -421,6 +436,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
           return
         }
         store.delete(targetId)
+        clearSessionActivePacket(targetId)
         sendJson(res, 200, {
           ok: true,
           deletedId: targetId,

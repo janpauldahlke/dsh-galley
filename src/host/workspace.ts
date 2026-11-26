@@ -14,6 +14,37 @@ import { GalleyStore } from './store.ts'
 
 let lastGalleyCwd: string | null = null
 const storesByRoot = new Map<string, GalleyStore>()
+/**
+ * Per-(root, sessionId) sticky active packet so human pane browsing never
+ * hijacks an in-flight agent session's un-anchored tool calls (M2.7).
+ */
+const sessionActivePackets = new Map<string, string>()
+
+export function setSessionActivePacket(
+  root: string,
+  sessionId: string | null | undefined,
+  packetId: string,
+): void {
+  const sid = sessionId?.trim()
+  if (sid && packetId) {
+    sessionActivePackets.set(`${root}::${sid}`, packetId)
+  }
+}
+
+export function getSessionActivePacket(
+  root: string,
+  sessionId: string | null | undefined,
+): string | null {
+  const sid = sessionId?.trim()
+  if (!sid) return null
+  return sessionActivePackets.get(`${root}::${sid}`) ?? null
+}
+
+export function clearSessionActivePacket(packetId: string): void {
+  for (const [k, v] of sessionActivePackets.entries()) {
+    if (v === packetId) sessionActivePackets.delete(k)
+  }
+}
 
 export function noteGalleyCwd(cwd: string | null | undefined): void {
   const trimmed = cwd?.trim()
@@ -58,4 +89,5 @@ export function getStoreForCwd(cwd?: string | null): { store: GalleyStore; root:
 export function _resetGalleyWorkspaceForTests(): void {
   lastGalleyCwd = null
   storesByRoot.clear()
+  sessionActivePackets.clear()
 }

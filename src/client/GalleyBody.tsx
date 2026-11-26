@@ -111,12 +111,14 @@ export function GalleyBody(props: {
   const [showPreflightDetails, setShowPreflightDetails] = useState(false)
 
   const localRevRef = useRef<number | null>(null)
+  const localPacketIdRef = useRef<string | null>(null)
   const postMutationFlagRef = useRef(false)
   const pollTimerRef = useRef<number | null>(null)
   const healthOkRef = useRef(false)
 
   useEffect(() => {
     localRevRef.current = null
+    localPacketIdRef.current = null
   }, [sessionCwd])
 
   // Track container width for auto wide/narrow split (480 px threshold, Spec 04 §3)
@@ -137,8 +139,10 @@ export function GalleyBody(props: {
     try {
       let url = withCwdQuery(STATE_ROUTE, sessionCwd)
       const knownRev = forceFull ? null : localRevRef.current
+      const knownPid = forceFull ? null : localPacketIdRef.current
       if (knownRev !== null && knownRev > 0) {
         url += `${url.includes('?') ? '&' : '?'}rev=${knownRev}`
+        if (knownPid) url += `&knownPacket=${encodeURIComponent(knownPid)}`
       }
       const res = await fetch(url, { cache: 'no-store' })
       if (res.status === 304) {
@@ -151,6 +155,7 @@ export function GalleyBody(props: {
       const data = (await res.json()) as StateResponsePayload
       const prevRev = localRevRef.current
       localRevRef.current = data.activePacket ? data.rev : 0
+      localPacketIdRef.current = data.activePacket ? data.packetId : null
       setPayload(data)
       setReconnecting(false)
       if (data.activePacket) {
@@ -434,6 +439,9 @@ export function GalleyBody(props: {
                 {activeData.title}
               </span>
               <code style={{ fontSize: 11, opacity: 0.72 }}>rev {activeData.rev}</code>
+              <code style={{ fontSize: 10, opacity: 0.55 }} title="Aktive Mappe-ID">
+                {activeData.packetId}
+              </code>
             </>
           )}
 

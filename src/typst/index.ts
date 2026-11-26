@@ -163,7 +163,9 @@ function inlineToContent(inlines: Inline[], depth = 0): string {
         parts.push(it.v.trim() === '' ? '' : `$${it.v}$`)
         break
       case 'newline':
-        parts.push('\\')
+        // Trailing space is mandatory in Typst markup mode so `\` + `#text(...)`
+        // never forms `\#` (an escaped literal `#` character!).
+        parts.push(' \\ ')
         break
       default:
         break
@@ -190,7 +192,7 @@ export function markerComment(id: string): string {
  * so the anchor sits at the top of its block.
  */
 function anchorRect(i: number): string {
-  return `#place(rect(width: 0.1pt, height: 0.1pt, fill: rgb(${(i + 1) & 0xff}, 0, 0)))`
+  return `#place(rect(width: 0.001pt, height: 0.001pt, fill: rgb(${(i + 1) & 0xff}, 0, 0)))`
 }
 
 /** Callout tone → fill + left accent. 0.14.2 `rgb()` takes 0–255 ints (or %);
@@ -307,7 +309,7 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       }
       lines.push(
         `#grid(columns: (1fr, auto), column-gutter: 12pt, align: (top, top))` +
-          `[#linebreak()${left.join('#linebreak()')}#linebreak()]${right}`,
+          `[${left.join('#linebreak()')}#linebreak()]${right}`,
         `#rect(width: 100%, height: 0.6pt, fill: luma(170))`,
       )
       break
@@ -350,15 +352,21 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
         lines.push(`#strong[#text(${typString(block.title)})]`, '')
       }
       if (ln) {
-        // Native 0.14.2 marginal line numbers (review H2.2). Scoped inside a
-        // #[...] group so the numbering does not leak past the block. `n` is
-        // 1-based across numbered lines; `start` offsets the displayed gutter number.
+        // Per-block marginal line numbers (Typst 0.14.2): a block-scoped `state`
+        // anchors this block's first rendered physical line `f`, so each `source_text`
+        // block resets cleanly to `start` (default 1) even when multiple sources sit
+        // on the same sheet or span across page breaks.
         const every = Math.max(1, ln.every ?? 1)
         const startOff = (ln.start ?? 1) - 1
-        const numExpr = startOff === 0 ? '#n' : `#(n + ${startOff})`
+        const stateKey = typString(`g_ln_${block.id}_${index}`)
+        const kExpr =
+          startOff === 0
+            ? `(if f == none { 1 } else { n - f + 1 })`
+            : `((if f == none { 1 } else { n - f + 1 }) + ${startOff})`
         lines.push(
           `#[`,
-          `#set par.line(numbering: n => if calc.rem(n, ${every}) == 0 { text(size: 8pt, fill: luma(110))[${numExpr}] })`,
+          `#let _gln = state(${stateKey}, none)`,
+          `#set par.line(numbering: n => context { let f = _gln.get(); let k = ${kExpr}; if f == none { _gln.update(n) }; if calc.rem(k, ${every}) == 0 { text(size: 8pt, fill: luma(110))[#k] } }, numbering-scope: "document")`,
           lineRuns.map((runs) => inlineToContent(runs)).join(' \\ '),
           `]`,
         )
@@ -372,9 +380,22 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
       }
       break
     }
-    case 'task':
-      lines.push(`#text(weight: "bold", ${typString(taskNum ? 'Aufgabe ' + taskNum : 'Aufgabe')}) ${inlineToContent(block.body)}`)
+    case 'task': {
+      // Avoid double "Aufgabe 1 Aufgabe 1:" when an author/model already wrote the prefix in `body`.
+      const firstNode = block.body?.[0]
+      const leadingText =
+        firstNode?.t === 'text'
+          ? firstNode.v
+          : firstNode?.t === 'strong' && firstNode.c?.[0]?.t === 'text'
+            ? firstNode.c[0].v
+            : ''
+      if (/^\s*Aufgabe\s+\d+\b/i.test(leadingText)) {
+        lines.push(inlineToContent(block.body))
+      } else {
+        lines.push(`#text(weight: "bold", ${typString(taskNum ? 'Aufgabe ' + taskNum : 'Aufgabe')}) ${inlineToContent(block.body)}`)
+      }
       break
+    }
     case 'table': {
       const cell = (cells: Inline[]): string => `[${inlineToContent(cells)}]`
       const headerCell = (cells: Inline[]): string => `[#strong[${inlineToContent(cells)}]]`
@@ -384,12 +405,25 @@ export function blockTypst(block: Block, index: number, assets?: Record<string, 
         while (out.length < cols) out.push([])
         return out.map(padFn)
       }
-      // Each cell MUST be its own comma-separated positional argument;
-      // table.header(...) works natively in 0.14.2 and 0.15.1.
       const hdr = pad(block.headers, headerCell)
       const bodyCells = block.rows.flatMap((r) => pad(r, cell))
+      let columnsSpec = String(cols)
+      if (Array.isArray(block.colWidths) && block.colWidths.length > 0) {
+        const safeSpecs: string[] = []
+        for (let ci = 0; ci < cols; ci++) {
+          const w = block.colWidths[ci]
+          if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
+            safeSpecs.push(`${w}fr`)
+          } else if (typeof w === 'string' && /^(\d+(\.\d+)?(%|fr|pt|cm|mm|em)|auto)$/.test(w.trim())) {
+            safeSpecs.push(w.trim())
+          } else {
+            safeSpecs.push('1fr')
+          }
+        }
+        columnsSpec = `(${safeSpecs.join(', ')})`
+      }
       const tableArgs = [
-        `columns: ${cols}`,
+        `columns: ${columnsSpec}`,
         `inset: 6pt`,
         `fill: (_, y) => if y == 0 { luma(245) } else { rgb(255, 255, 255) }`,
         `stroke: 0.5pt + luma(180)`,
@@ -449,9 +483,13 @@ function preamble(sheet: GalleySheet): string[] {
   L.push(`#set text(size: 10pt, lang: "de")`)
   L.push(`#set par(justify: true, leading: 0.75em)`)
   L.push(`#set heading(numbering: none)`)
-  // No `#title` when a `header` block carries the title (arbeitsblatt sheet 1);
-  // the M2 UI emits a single `#title` only for header-less packets.
-  if (!sheet.blocks.some((b) => b.type === 'header')) {
+  // Suppress `#title` when a `header` block carries the title OR block 0 is already
+  // a level-1 `heading` (prevents duplicate "Erwartungshorizont" headings on s2).
+  const firstBlk = sheet.blocks[0]
+  const hasOwnBanner =
+    sheet.blocks.some((b) => b.type === 'header') ||
+    (firstBlk?.type === 'heading' && (firstBlk.level ?? 1) === 1)
+  if (!hasOwnBanner) {
     L.push(`#title(${typString(sheet.title)})`)
   }
   return L
