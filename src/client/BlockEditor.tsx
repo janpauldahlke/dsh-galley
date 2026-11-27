@@ -39,7 +39,7 @@ export interface BlockEditorProps {
   onCommitPatch: (blockId: BlockId, patch: Record<string, unknown>, baseHash?: string) => Promise<CommitOutcome>
   onUploadAsset: (args: {
     blockId: BlockId
-    slotMode: 'media-right' | 'media-left'
+    slotMode: 'media-right' | 'media-left' | 'media-below'
     mimeType: string
     dataBase64: string
     alt?: string
@@ -153,8 +153,10 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
   const ingestImageFile = async (file: File): Promise<void> => {
     if (!file.type.startsWith('image/')) return
     const { mimeType, dataBase64, name } = await readFileAsBase64(file)
-    const mode: 'media-right' | 'media-left' =
-      draft.slot.mode === 'media-left' ? 'media-left' : 'media-right'
+    const mode: 'media-right' | 'media-left' | 'media-below' =
+      draft.slot.mode === 'media-left' || draft.slot.mode === 'media-below'
+        ? draft.slot.mode
+        : 'media-right'
     if (draft.dirty) {
       await commitNow(true)
     }
@@ -221,7 +223,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
           },
         }
       }
-      // media-right / media-left: bind existing asset if one exists in packet
+      // media-right / media-left / media-below: bind existing asset if one exists in packet
       const fallbackAsset = prev.slot.asset
         ? prev.slot.asset
         : assetList[0]
@@ -238,7 +240,10 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
   }
 
   const mediaMissingAsset =
-    (draft.slot.mode === 'media-right' || draft.slot.mode === 'media-left') && !draft.slot.asset
+    (draft.slot.mode === 'media-right' ||
+      draft.slot.mode === 'media-left' ||
+      draft.slot.mode === 'media-below') &&
+    !draft.slot.asset
 
   return (
     <div
@@ -609,6 +614,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
               <option value="card-grid" style={{ color: '#111' }}>card-grid (cut-out cards)</option>
               <option value="media-right" style={{ color: '#111' }}>media-right (65/35 image right)</option>
               <option value="media-left" style={{ color: '#111' }}>media-left (35/65 image left)</option>
+              <option value="media-below" style={{ color: '#111' }}>media-below (full-width figure below)</option>
             </select>
 
             {draft.slot.mode === 'card-grid' && (
@@ -680,7 +686,9 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
             </button>
           </div>
 
-          {(draft.slot.mode === 'media-right' || draft.slot.mode === 'media-left') && (
+          {(draft.slot.mode === 'media-right' ||
+            draft.slot.mode === 'media-left' ||
+            draft.slot.mode === 'media-below') && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {assetList.length > 0 ? (
                 <>

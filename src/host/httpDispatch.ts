@@ -644,8 +644,12 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
 
         const targetBlockId = typeof body.blockId === 'string' ? body.blockId : undefined
         if (targetBlockId) {
-          const slotMode: 'media-right' | 'media-left' =
-            body.slotMode === 'media-left' ? 'media-left' : 'media-right'
+          const slotMode: 'media-right' | 'media-left' | 'media-below' =
+            body.slotMode === 'media-left'
+              ? 'media-left'
+              : body.slotMode === 'media-below'
+                ? 'media-below'
+                : 'media-right'
           const alt = typeof body.alt === 'string' && body.alt.trim() ? body.alt.trim() : assetId
           const widthCm = typeof body.widthCm === 'number' && body.widthCm > 0 ? body.widthCm : undefined
           const slot: LayoutSlot = {

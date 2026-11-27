@@ -66,7 +66,7 @@ export interface BlockTrayProps {
   onRemoveBlock: (sheetId: SheetId, blockId: BlockId) => Promise<void>
   onUploadAsset: (args: {
     blockId: BlockId
-    slotMode: 'media-right' | 'media-left'
+    slotMode: 'media-right' | 'media-left' | 'media-below'
     mimeType: string
     dataBase64: string
     alt?: string

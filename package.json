@@ -1,6 +1,6 @@
 {
   "name": "dsh-galley",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Shared volatile document workbench & typesetter (Druck und Satz) for human + agent co-authoring in DeepSeek Harness. Block-addressed galley packets, instant Typst A4 proof, deterministic PDF/DOCX/TYP exporters.",
   "type": "module",
   "main": "lib/index.js",
@@ -62,7 +62,8 @@
     "@myriaddreamin/typst-ts-node-compiler": "^0.7.0",
     "@myriaddreamin/typst-ts-renderer": "^0.7.0",
     "@myriaddreamin/typst-ts-web-compiler": "^0.7.0",
-    "@myriaddreamin/typst.ts": "0.7.0"
+    "@myriaddreamin/typst.ts": "0.7.0",
+    "@resvg/resvg-js": "^2.6.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

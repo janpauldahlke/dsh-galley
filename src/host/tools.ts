@@ -66,6 +66,7 @@ import {
   exportSheetDocx,
   unpackDocxEntries,
   probeImageDimensions,
+  probeSvgDimensions,
   splitInlinesTwoColumn,
 } from './docx.ts'
 
@@ -73,6 +74,7 @@ export {
   exportSheetDocx,
   unpackDocxEntries,
   probeImageDimensions,
+  probeSvgDimensions,
   splitInlinesTwoColumn,
   validateProvenance,
   splitSvgPages,
@@ -295,7 +297,9 @@ export const MAX_INLINE_DEPTH = 3
 export function validateSlot(slot: LayoutSlot): string | null {
   if (!slot || typeof slot !== 'object') return 'invalid_slot'
   if (slot.mode === 'full' && slot.asset) return 'invalid_slot'
-  if ((slot.mode === 'media-right' || slot.mode === 'media-left') && !slot.asset) return 'invalid_slot'
+  if ((slot.mode === 'media-right' || slot.mode === 'media-left' || slot.mode === 'media-below') && !slot.asset) {
+    return 'invalid_slot'
+  }
   if (slot.mode === 'card-grid' && slot.columns !== undefined && ![2, 3, 4].includes(slot.columns)) {
     return 'invalid_slot'
   }

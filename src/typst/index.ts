@@ -273,6 +273,12 @@ function wrapSlot(block: Block, body: string, assets?: Record<string, unknown>):
       const img = slot.asset ? mediaImage(assets, slot.asset.id, slot.asset.widthCm) : ''
       return `#grid(columns: (35%, 65%), column-gutter: 12pt)[${img}][${body}]`
     }
+    case 'media-below': {
+      const img = slot.asset ? mediaImage(assets, slot.asset.id, slot.asset.widthCm) : ''
+      if (!img) return body
+      if (!body.trim()) return `#align(center)[${img}]`
+      return `#stack(dir: ttb, spacing: 8pt, [${body}], align(center)[${img}])`
+    }
     case 'two-column':
       return `#columns(2, gutter: 12pt)[${body}]`
     case 'card-grid': {

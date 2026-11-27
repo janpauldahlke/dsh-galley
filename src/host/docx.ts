@@ -1,12 +1,15 @@
 /**
- * dsh-galley — deterministic, zero-dependency in-process `.docx` OOXML exporter (Spec 03 §8).
+ * dsh-galley — deterministic in-process `.docx` OOXML exporter (Spec 03 §8).
  *
- * Uses only `node:zlib` (raw Deflate + CRC-32) so `lib/galley-core.mjs` and
- * `lib/index.js` ship zero transitive npm dependencies (`jszip`/`docx` trees),
- * work inside npm tarballs and Electron `.asar` bundles alike, and produce
- * byte-identical `.docx` SHA-256 hashes for any fixed packet revision.
+ * Uses only `node:zlib` (raw Deflate + CRC-32) for the ZIP container (no
+ * `jszip`/`docx` trees) so the artifact works inside npm tarballs and
+ * Electron `.asar` bundles alike and produces byte-identical SHA-256 hashes
+ * for any fixed packet revision. SVG assets are rasterized to PNG at export
+ * time via `@resvg/resvg-js` (deterministic) so Word renders them with a
+ * correct aspect ratio (CR-001).
  */
 import { crc32 as nodeCrc32, deflateRawSync, inflateRawSync } from 'node:zlib'
+import { Resvg } from '@resvg/resvg-js'
 import { getGalleyStrings } from '../shared/i18n.ts'
 import type {
   AssetMeta,
@@ -66,8 +69,41 @@ function parseIsoTimestamp(raw: string | undefined): string {
   return '2026-01-01T00:00:00Z'
 }
 
-/** Inspect PNG / JPEG / GIF headers for intrinsic pixel dimensions (fallback 400×300). */
-export function probeImageDimensions(bytes: Buffer): { widthPx: number; heightPx: number } {
+/**
+ * Parse intrinsic dimensions from an SVG's opening tag (CR-001). Numeric
+ * `width`/`height` win (optional `px`/`pt`/`cm`/`mm`/`in` suffix stripped);
+ * `%` and non-numeric values are ignored in favor of the `viewBox` W/H;
+ * returns null when nothing usable is found.
+ */
+export function probeSvgDimensions(bytes: Buffer): { widthPx: number; heightPx: number } | null {
+  if (bytes.length < 4) return null
+  const head = bytes.toString('utf8', 0, Math.min(2048, bytes.length))
+  if (!head.includes('<svg')) return null
+  const openTag = head.match(/<svg\b[^>]*>/i)?.[0]
+  if (!openTag) return null
+  const numAttr = (name: string): number | null => {
+    const m = openTag.match(new RegExp(`${name}\\s*=\\s*["']([^"']*)["']`, 'i'))
+    if (!m || m[1].includes('%')) return null
+    const n = Number.parseFloat(m[1].replace(/(px|pt|cm|mm|in)\s*$/i, ''))
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+  const w = numAttr('width')
+  const h = numAttr('height')
+  if (w !== null && h !== null) return { widthPx: Math.round(w), heightPx: Math.round(h) }
+  const vb = openTag.match(/viewBox\s*=\s*["']([^"']+)["']/i)
+  if (vb) {
+    const p = vb[1].trim().split(/[\s,]+/).map(Number.parseFloat)
+    if (p.length === 4 && p[2] > 0 && p[3] > 0) {
+      return { widthPx: Math.round(p[2]), heightPx: Math.round(p[3]) }
+    }
+  }
+  return null
+}
+
+/** Intrinsic pixel dimensions, or null when the format/bytes yield none. */
+export function probeImageDimensionsOrNull(bytes: Buffer): { widthPx: number; heightPx: number } | null {
+  const svg = probeSvgDimensions(bytes)
+  if (svg) return svg
   // PNG: 8-byte signature + IHDR chunk (width @ 16, height @ 20, big-endian uint32)
   if (
     bytes.length >= 24 &&
@@ -120,7 +156,12 @@ export function probeImageDimensions(bytes: Buffer): { widthPx: number; heightPx
       off += 2 + segLen
     }
   }
-  return { widthPx: 400, heightPx: 300 }
+  return null
+}
+
+/** Inspect PNG / JPEG / GIF / SVG for intrinsic pixel dimensions (fallback 400×300). */
+export function probeImageDimensions(bytes: Buffer): { widthPx: number; heightPx: number } {
+  return probeImageDimensionsOrNull(bytes) ?? { widthPx: 400, heightPx: 300 }
 }
 
 function extFromAsset(meta: AssetMeta | undefined): { ext: string; mime: string } {
@@ -582,20 +623,50 @@ interface SheetBuildContext {
   taskIndexByBlockId: Map<BlockId, number>
 }
 
+/**
+ * Rasterize an SVG asset to PNG at 2× intrinsic width (CR-001) so Word —
+ * which has no reliable vector-SVG support in OOXML — gets a crisp
+ * fixed-ratio raster. Returns null when rasterization fails (caller keeps
+ * the raw SVG bytes as a best-effort fallback).
+ */
+function rasterizeSvgToPng(bytes: Buffer, meta: AssetMeta | undefined): Buffer | null {
+  try {
+    const intrinsic = probeSvgDimensions(bytes)
+    const widthPx = intrinsic?.widthPx ?? (meta?.widthPx && meta.widthPx > 0 ? meta.widthPx : undefined)
+    const opts =
+      widthPx !== undefined
+        ? { fitTo: { mode: 'width' as const, value: widthPx * 2 } }
+        : undefined
+    const png = new Resvg(bytes, opts).render().asPng()
+    return png.length > 0 ? png : null
+  } catch {
+    return null
+  }
+}
+
 function registerOrGetMedia(ctx: SheetBuildContext, assetId: string): MediaEmbed | null {
   const existing = ctx.mediaByAssetId.get(assetId)
   if (existing) return existing
   const bytes = ctx.assetBytes[assetId]
   if (!bytes || bytes.length === 0) return null
   const meta = ctx.packet.assets?.[assetId]
-  const { ext, mime } = extFromAsset(meta)
+  let { ext, mime } = extFromAsset(meta)
+  let embedBytes = bytes
+  if (mime === 'image/svg+xml') {
+    const png = rasterizeSvgToPng(bytes, meta)
+    if (png) {
+      embedBytes = png
+      ext = 'png'
+      mime = 'image/png'
+    }
+  }
   const idx = ctx.mediaList.length + 1
   const embed: MediaEmbed = {
     relId: `rIdImg${idx}`,
     zipPath: `word/media/${assetId}.${ext}`,
     ext,
     mime,
-    bytes,
+    bytes: embedBytes,
     docPrId: ctx.nextDocPrId++,
   }
   ctx.mediaByAssetId.set(assetId, embed)
@@ -612,9 +683,17 @@ function renderMediaParagraphXml(
 ): string {
   const embed = registerOrGetMedia(ctx, assetId)
   if (!embed) {
-    return `<w:p><w:r>${renderRunProps({ italic: true, colorHex: '666666' })}<w:t xml:space="preserve">${escapeXml(`[Image: ${alt || assetId}]`)}</w:t></w:r></w:p>`
+    return `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r>${renderRunProps({ italic: true, colorHex: '666666' })}<w:t xml:space="preserve">${escapeXml(`[Image: ${alt || assetId}]`)}</w:t></w:r></w:p>`
   }
-  const { widthPx, heightPx } = probeImageDimensions(embed.bytes)
+  // Prefer probed intrinsic dims, then the staged AssetMeta dims (CR-001:
+  // SVGs are rasterized above so their PNG header is authoritative), then the
+  // historic 400×300 default.
+  const probed = probeImageDimensionsOrNull(embed.bytes)
+  const metaDims = ctx.packet.assets?.[assetId]
+  const metaW = metaDims?.widthPx && metaDims.widthPx > 0 ? metaDims.widthPx : null
+  const metaH = metaDims?.heightPx && metaDims.heightPx > 0 ? metaDims.heightPx : null
+  const widthPx = probed?.widthPx ?? metaW ?? 400
+  const heightPx = probed?.heightPx ?? metaH ?? 300
   const maxWidthEmu = Math.round((maxWidthTwips / TWIPS_PER_PT) * EMU_PER_PT)
   const desiredWidthEmu =
     explicitWidthCm && Number.isFinite(explicitWidthCm) && explicitWidthCm > 0
@@ -627,7 +706,7 @@ function renderMediaParagraphXml(
   const safeName = escapeXml(`${assetId}.${embed.ext}`)
 
   return (
-    '<w:p><w:r><w:drawing>' +
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>' +
     '<wp:inline distT="0" distB="0" distL="0" distR="0">' +
     `<wp:extent cx="${cx}" cy="${cy}"/>` +
     '<wp:effectExtent l="0" t="0" r="0" b="0"/>' +
@@ -892,6 +971,15 @@ function renderBlockWithSlotXml(ctx: SheetBuildContext, block: Block): string {
         `<w:tr>${leftCell}${rightCell}</w:tr>` +
         '</w:tbl>'
       )
+    }
+
+    case 'media-below': {
+      // CR-001: full-width figure below the body text — no table wrapper.
+      const bodyXml = renderBlockCoreXml(ctx, block, totalW)
+      const imgXml = slot.asset
+        ? renderMediaParagraphXml(ctx, slot.asset.id, slot.asset.alt, totalW, slot.asset.widthCm)
+        : ''
+      return `${bodyXml}${imgXml}`
     }
 
     case 'two-column': {

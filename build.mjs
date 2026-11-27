@@ -13,12 +13,13 @@
 import { buildDshPlugin } from 'dsh-build-tools'
 
 await buildDshPlugin({
-  host: { externals: ['@deepseek-ai/*', '@myriaddreamin/*'] },
+  host: { externals: ['@deepseek-ai/*', '@myriaddreamin/*', '@resvg/*'] },
   modules: [
     { entry: 'src/typst/index.ts', out: 'typst-render.mjs' },
-    // HERMETIC M1 core (store + six tools + ast); node: builtins only — the
-    // render arm is injected, so `node --test` runs it without dsh or the arms.
-    { entry: 'src/host/tools.ts', out: 'galley-core.mjs' },
+    // Hermetic M1 core (store + six tools + ast); node: builtins only +
+    // @resvg (native .node, external) — the render arm is injected, so
+    // `node --test` runs it without dsh or the arms.
+    { entry: 'src/host/tools.ts', out: 'galley-core.mjs', externals: ['@resvg/*'] },
     // Pure client pane state/protocol helpers for hermetic `node --test`.
     { entry: 'src/client/paneModel.ts', out: 'galley-pane.mjs' },
   ],

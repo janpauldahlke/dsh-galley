@@ -9,7 +9,7 @@ import type { GalleyLocale } from './i18n.ts'
 export type { GalleyLocale }
 
 export const PLUGIN = 'dsh-galley'
-export const VERSION = '0.2.1'
+export const VERSION = '0.2.2'
 export const HEALTH_ROUTE = '/api/galley/health'
 export const STATE_ROUTE = '/api/galley/state'
 export const EDIT_ROUTE = '/api/galley/edit'
@@ -50,8 +50,8 @@ export interface AssetRef {
 }
 
 export interface LayoutSlot {
-  mode: 'full' | 'media-right' | 'media-left' | 'two-column' | 'card-grid'
-  /** required for media-right / media-left. */
+  mode: 'full' | 'media-right' | 'media-left' | 'media-below' | 'two-column' | 'card-grid'
+  /** required for media-right / media-left / media-below. */
   asset?: AssetRef
   /** card-grid only (default 3). */
   columns?: 2 | 3 | 4

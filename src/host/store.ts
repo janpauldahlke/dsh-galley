@@ -1047,6 +1047,38 @@ export class GalleyStore {
     return existsSync(p) ? readFileSync(p) : null
   }
 
+  /**
+   * Remove an asset (CR-001): unlink its bytes, drop the metadata entry,
+   * free the slot toward MAX_ASSETS_PER_PACKET. Refuses while any block on
+   * any sheet still references it via `slot.asset` (live sheets must never
+   * break). Returns true when removed, false when the asset did not exist.
+   */
+  removeAsset(id: string, assetId: string, opts?: { bumpRev?: boolean }): boolean {
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    const assets = packet.assets ?? {}
+    const meta = assets[assetId]
+    if (!meta) return false
+    for (const sid of packet.sheetOrder) {
+      for (const b of packet.sheets[sid]?.blocks ?? []) {
+        if (b.slot?.asset?.id === assetId) {
+          throw new StoreError('invalid_op', `asset ${assetId} is still referenced by block ${b.id}`)
+        }
+      }
+    }
+    const file = join(this.dir(id), 'assets', basename(meta.path))
+    if (existsSync(file)) unlinkSync(file)
+    const rest = { ...assets }
+    delete rest[assetId]
+    packet.assets = rest
+    if (opts?.bumpRev !== false) {
+      packet.rev += 1
+      packet.updatedAt = new Date().toISOString()
+    }
+    this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
+    return true
+  }
+
   // ── atomic write (spec 01 §9): temp → fsync → rename ─────────────────────
 
   atomicWrite(path: string, data: string): void {
