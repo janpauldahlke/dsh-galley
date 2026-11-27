@@ -200,6 +200,59 @@ test('CR-001.2.2: viewBox-only SVG keeps its ratio in .docx', async () => {
   assert.ok(Math.abs(Number(m[2]) / Number(m[1]) - expected) < 0.01, 'viewBox aspect ratio preserved')
 })
 
+test('CR-001.2.3: resvg uses bundled fonts (text is not silently dropped, output deterministic)', async () => {
+  // Regression: without `font: { fontFiles, loadSystemFonts: false }` resvg falls
+  // back to system fonts; on a host without Liberation Sans the <text> glyphs
+  // vanish and the text SVG rasterizes identically to the blank twin.
+  const svgWithText = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60" viewBox="0 0 200 60">' +
+      '<rect width="200" height="60" fill="#ffffff"/>' +
+      '<text x="10" y="40" font-family="Liberation Sans" font-size="24" fill="#000000">Ag</text></svg>',
+  )
+  const svgNoText = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60" viewBox="0 0 200 60">' +
+      '<rect width="200" height="60" fill="#ffffff"/></svg>',
+  )
+  const opened = await galleyOpen(deps, {
+    template: 'generic',
+    title: 'CR-001 Fonts',
+    origin: 'agent',
+    assets: [
+      { id: 'a1', path: 'assets/a1.svg', mimeType: 'image/svg+xml' },
+      { id: 'a2', path: 'assets/a2.svg', mimeType: 'image/svg+xml' },
+    ],
+  })
+  assert.equal(opened.ok, true, JSON.stringify(opened))
+  const pid = opened.packetId
+  store.addAsset(pid, { id: 'a1', path: 'assets/a1.svg', bytesSha256: sha256(svgWithText), mimeType: 'image/svg+xml' }, svgWithText)
+  store.addAsset(pid, { id: 'a2', path: 'assets/a2.svg', bytesSha256: sha256(svgNoText), mimeType: 'image/svg+xml' }, svgNoText)
+  for (const [id, assetId] of [['b1', 'a1'], ['b2', 'a2']]) {
+    const ins = await galleyEditBlock(deps, {
+      sheetId: 's1',
+      op: 'insert',
+      origin: 'agent',
+      block: { type: 'prose', body: '', slot: { mode: 'media-below', asset: { id: assetId, path: `assets/${assetId}.svg`, alt: assetId } } },
+    })
+    assert.equal(ins.ok, true, JSON.stringify(ins))
+  }
+
+  const exp1 = await galleyExport(deps, { packetId: pid, format: 'docx' })
+  assert.equal(exp1.ok, true, JSON.stringify(exp1))
+  const parts1 = unpackDocxEntries(exp1.bytes)
+  const withText = parts1['word/media/a1.png']
+  const withoutText = parts1['word/media/a2.png']
+  assert.ok(withText && withoutText, 'both SVGs rasterized to PNG parts')
+  assert.notEqual(
+    sha256(withText),
+    sha256(withoutText),
+    'text SVG must rasterize differently from its blank twin (glyphs must render from bundled fonts)',
+  )
+
+  // Determinism: a second export at the same revision is byte-identical.
+  const exp2 = await galleyExport(deps, { packetId: pid, format: 'docx' })
+  assert.equal(sha256(exp2.bytes), sha256(exp1.bytes), 'SVG-rasterized docx must be byte-deterministic')
+})
+
 test('CR-001.3: removeAsset frees the slot, unlinks bytes, refuses referenced assets', async () => {
   const opened = await galleyOpen(deps, { template: 'generic', title: 'CR001 Assets', origin: 'agent' })
   assert.equal(opened.ok, true, JSON.stringify(opened))

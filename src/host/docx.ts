@@ -9,7 +9,9 @@
  * correct aspect ratio (CR-001).
  */
 import { crc32 as nodeCrc32, deflateRawSync, inflateRawSync } from 'node:zlib'
+import { join } from 'node:path'
 import { Resvg } from '@resvg/resvg-js'
+import { BUNDLED_FONT_FILES, resolveBundledFontsDir } from './arms/fonts.ts'
 import { getGalleyStrings } from '../shared/i18n.ts'
 import type {
   AssetMeta,
@@ -633,10 +635,17 @@ function rasterizeSvgToPng(bytes: Buffer, meta: AssetMeta | undefined): Buffer |
   try {
     const intrinsic = probeSvgDimensions(bytes)
     const widthPx = intrinsic?.widthPx ?? (meta?.widthPx && meta.widthPx > 0 ? meta.widthPx : undefined)
-    const opts =
-      widthPx !== undefined
-        ? { fitTo: { mode: 'width' as const, value: widthPx * 2 } }
-        : undefined
+    // Pin rasterization to the bundled SIL fonts so glyph coverage and
+    // output bytes are identical on every machine (no system-font scanning).
+    const fontsDir = resolveBundledFontsDir()
+    const opts = {
+      font: {
+        fontFiles: fontsDir ? BUNDLED_FONT_FILES.map((f) => join(fontsDir, f)) : undefined,
+        loadSystemFonts: !fontsDir,
+        defaultFontFamily: 'Liberation Sans',
+      },
+      ...(widthPx !== undefined ? { fitTo: { mode: 'width' as const, value: widthPx * 2 } } : {}),
+    }
     const png = new Resvg(bytes, opts).render().asPng()
     return png.length > 0 ? png : null
   } catch {
