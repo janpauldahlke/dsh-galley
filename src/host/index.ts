@@ -311,6 +311,10 @@ export function registerGalleyTools(ctx: Context): () => void {
           enum: ['en', 'de'],
           description: 'Optional document print label locale ("en" default; "de" for German print labels).',
         },
+        colophon: {
+          oneOf: [{ type: 'boolean' }, { type: 'string' }],
+          description: 'Optional opt-in bottom-margin colophon (`true` for localized neutral default, or custom string).',
+        },
         orientation: { type: 'string', enum: ['portrait', 'landscape'] },
         targetPages: { type: 'integer' },
         blocks: {

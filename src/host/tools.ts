@@ -34,7 +34,7 @@ import type {
   GalleyLocale,
   SourceProvenance,
 } from '../shared/types.ts'
-import { getGalleyStrings, GALLEY_I18N, DEFAULT_LOCALE } from '../shared/i18n.ts'
+import { getGalleyStrings, GALLEY_I18N, DEFAULT_LOCALE, resolveColophonText } from '../shared/i18n.ts'
 import {
   GalleyStore,
   StoreError,
@@ -43,7 +43,7 @@ import {
   hashBlock,
   validateProvenance,
 } from './store.ts'
-import { compileSheet, splitSvgPages } from '../typst/index.ts'
+import { compileSheet, deriveHitBands, deriveReceipt, parseSvgPages, splitSvgPages } from '../typst/index.ts'
 import { serializeInlines, parseInlines } from '../shared/inlineMarkup.ts'
 import { createGalleyHttpDispatcher, httpStatusForCode } from './httpDispatch.ts'
 import {
@@ -77,6 +77,9 @@ export {
   probeSvgDimensions,
   splitInlinesTwoColumn,
   validateProvenance,
+  deriveHitBands,
+  deriveReceipt,
+  parseSvgPages,
   splitSvgPages,
   serializeInlines,
   parseInlines,
@@ -86,6 +89,7 @@ export {
   defaultGalleyRegistry,
   BUILTIN_TEMPLATES,
   getGalleyStrings,
+  resolveColophonText,
   GALLEY_I18N,
   DEFAULT_LOCALE,
   getStoreForCwd,
@@ -770,6 +774,8 @@ export interface OpenArgs {
   template?: string
   title?: string
   locale?: GalleyLocale
+  /** Opt-in footer colophon (`true` for neutral localized default, or custom string). */
+  colophon?: boolean | string
   orientation?: 'portrait' | 'landscape'
   blocks?: Record<string, unknown>[]
   targetPages?: number
@@ -783,6 +789,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
   rev: number
   title: string
   template: string
+  colophon?: boolean | string
   reviewMode: ReviewMode
   sheetOrder: SheetId[]
   blocks: Record<SheetId, BlockOutline[]>
@@ -791,7 +798,15 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
 }> | ToolFailure> {
   const { store } = deps
   if (args.id !== undefined) {
-    if (args.template || args.title || args.orientation || args.blocks || args.targetPages !== undefined || args.assets) {
+    if (
+      args.template ||
+      args.title ||
+      args.colophon !== undefined ||
+      args.orientation ||
+      args.blocks ||
+      args.targetPages !== undefined ||
+      args.assets
+    ) {
       return fail(Err.INVALID_PARAMS, 'id is exclusive with packet creation fields')
     }
     const existing = store.load(args.id)
@@ -805,6 +820,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       rev: existing.rev,
       title: existing.title,
       template: existing.template,
+      ...(existing.colophon !== undefined ? { colophon: existing.colophon } : {}),
       reviewMode: existing.reviewMode ?? 'auto',
       sheetOrder: existing.sheetOrder,
       blocks,
@@ -820,6 +836,9 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
   if (!isLegacyFastPath && !customBlueprint) {
     return fail(Err.INVALID_PARAMS, `unknown template '${template}'`)
   }
+  if (args.colophon !== undefined && typeof args.colophon !== 'boolean' && typeof args.colophon !== 'string') {
+    return fail(Err.INVALID_PARAMS, 'colophon must be a boolean or string')
+  }
 
   try {
     const id = 'p-' + base32(randomBytes(8), 8)
@@ -828,12 +847,20 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       (customBlueprint ? customBlueprint.title : 'Document')
     const packetLocale: GalleyLocale | undefined =
       (args as { locale?: GalleyLocale }).locale ?? customBlueprint?.locale
+    const rawColophon = args.colophon !== undefined ? args.colophon : customBlueprint?.colophon
+    const normalizedColophon: boolean | string | undefined =
+      rawColophon === true
+        ? true
+        : typeof rawColophon === 'string' && rawColophon.trim().length > 0
+          ? rawColophon.trim()
+          : undefined
 
     const packet: GalleyPacket = {
       id,
       template,
       title: packetTitle,
       ...(packetLocale ? { locale: packetLocale } : {}),
+      ...(normalizedColophon !== undefined ? { colophon: normalizedColophon } : {}),
       reviewMode: 'auto',
       rev: 0,
       createdAt: '',
@@ -925,6 +952,7 @@ export async function galleyOpen(deps: GalleyToolsDeps, args: OpenArgs): Promise
       rev: loaded.rev,
       title: loaded.title,
       template: loaded.template,
+      ...(loaded.colophon !== undefined ? { colophon: loaded.colophon } : {}),
       reviewMode: loaded.reviewMode ?? 'auto',
       sheetOrder: loaded.sheetOrder,
       blocks,
@@ -945,6 +973,7 @@ export async function galleyStatus(deps: GalleyToolsDeps, args: StatusArgs): Pro
   rev: number
   title: string
   template: string
+  colophon?: boolean | string
   reviewMode: ReviewMode
   sheetOrder: SheetId[]
   blocks: Record<SheetId, BlockOutline[]>
@@ -972,6 +1001,7 @@ export async function galleyStatus(deps: GalleyToolsDeps, args: StatusArgs): Pro
     rev: packet.rev,
     title: packet.title,
     template: packet.template,
+    ...(packet.colophon !== undefined ? { colophon: packet.colophon } : {}),
     reviewMode: packet.reviewMode ?? 'auto',
     sheetOrder: packet.sheetOrder,
     blocks,
@@ -2080,7 +2110,7 @@ export async function galleyExport(
 
       switch (args.format) {
         case 'typ':
-          text = compileSheet(sheet, packet.assets, packet.locale).typ
+          text = compileSheet(sheet, packet.assets, packet.locale, { colophon: packet.colophon }).typ
           bytes = Buffer.from(text, 'utf8')
           break
         case 'md':

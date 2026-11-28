@@ -36,6 +36,8 @@ export interface BlockEditorProps {
   allBlockIds: BlockId[]
   assets: Record<AssetId, AssetMeta>
   busy: boolean
+  /** Monotonic counter incremented when `ProofView` paper click requests immediate `<textarea>` focus. */
+  focusNonce?: number
   onCommitPatch: (blockId: BlockId, patch: Record<string, unknown>, baseHash?: string) => Promise<CommitOutcome>
   onUploadAsset: (args: {
     blockId: BlockId
@@ -89,13 +91,34 @@ function readFileAsBase64(file: File): Promise<{ mimeType: string; dataBase64: s
 }
 
 export function BlockEditor(props: BlockEditorProps): ReactNode {
-  const { block, allBlockIds, assets, busy, onCommitPatch, onUploadAsset, onDirtyChange } = props
+  const { block, allBlockIds, assets, busy, focusNonce, onCommitPatch, onUploadAsset, onDirtyChange } = props
 
   const [draft, setDraft] = useState<BlockDraftBuffer>(() => blockToDraftBuffer(block))
   const [dropActive, setDropActive] = useState(false)
   const [showDeps, setShowDeps] = useState(() => (block.dependsOn?.length ?? 0) > 0)
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Direct-manipulation paper click -> scroll block into view and focus its `<textarea>` (or primary input).
+  useEffect(() => {
+    if (!focusNonce) return
+    const frame = requestAnimationFrame(() => {
+      containerRef.current?.scrollIntoView?.({ block: 'nearest' })
+      if (textareaRef.current) {
+        const el = textareaRef.current
+        el.focus()
+        const len = el.value.length
+        el.setSelectionRange(len, len)
+        return
+      }
+      const fallback = containerRef.current?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        'textarea, input[type="text"], input:not([type="checkbox"]):not([type="file"]):not([type="number"])',
+      )
+      fallback?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [focusNonce])
 
   // Reconcile server updates without overwriting dirty human keystrokes
   useEffect(() => {
@@ -247,6 +270,7 @@ export function BlockEditor(props: BlockEditorProps): ReactNode {
 
   return (
     <div
+      ref={containerRef}
       data-testid={`galley-editor-${block.id}`}
       onBlur={handleContainerBlur}
       onKeyDown={handleKeyDown}

@@ -9,7 +9,7 @@ import type { GalleyLocale } from './i18n.ts'
 export type { GalleyLocale }
 
 export const PLUGIN = 'dsh-galley'
-export const VERSION = '0.2.3'
+export const VERSION = '0.2.4'
 export const HEALTH_ROUTE = '/api/galley/health'
 export const STATE_ROUTE = '/api/galley/state'
 export const EDIT_ROUTE = '/api/galley/edit'
@@ -213,6 +213,8 @@ export interface GalleyPacket {
   title: string
   /** Optional document print locale ('en' default; 'de' set by German domain templates). */
   locale?: GalleyLocale
+  /** Opt-in bottom-margin colophon line (`true` uses localized neutral default; `string` renders custom text). */
+  colophon?: boolean | string
   /** 'auto' (default): agent patches on human blocks propose; 'review': ALL agent ops propose. */
   reviewMode?: ReviewMode
   /** monotonically increasing; +1 per committed change (incl. undo/redo/proposals). */
@@ -236,6 +238,8 @@ export interface GalleyTemplateBlueprint {
   description?: string
   /** Optional print locale inherited by packets created from this template (default 'en'). */
   locale?: GalleyLocale
+  /** Optional opt-in colophon inherited by packets created from this template. */
+  colophon?: boolean | string
   source?: 'builtin' | 'plugin' | 'workspace'
   sheets: {
     id: SheetId
@@ -283,6 +287,14 @@ export interface SheetProofReceipt {
   compiledAtRev: number
 }
 
+/** Page-local vertical hit-band derived from `#010000..#ff0000` Typst SVG anchors (0.2.4). */
+export interface ProofHitBand {
+  pageIndex: number
+  yTopPt: number
+  yBottomPt: number
+  blockId: BlockId
+}
+
 /** The full renderer output for one sheet (spec 03 §2, port shape). */
 export interface SheetRender {
   sheetId: SheetId
@@ -296,6 +308,8 @@ export interface SheetRender {
   overflowLinesOnLastPage: number
   /** per-block page attribution: blockId -> 0-based page index. */
   blockToPage: Record<BlockId, number>
+  /** page-local vertical hit-bands for direct-manipulation click-to-block in ProofView. */
+  hitBands?: ProofHitBand[]
   diagnostics: RenderDiagnostic[]
   compiledAtRev: number
 }
@@ -360,6 +374,7 @@ export interface StateProofView {
   targetPages?: number | null
   targetPagesMet?: boolean | null
   blockToPage: Record<BlockId, number>
+  hitBands?: ProofHitBand[]
   compiledAtRev: number
   /** Per-page SVG data URIs (`data:image/svg+xml;base64,…`), isolated for inline DOM mount. */
   svgPages: string[]
@@ -376,6 +391,7 @@ export interface StateActivePayload {
   packetId: PacketId
   template: string
   title: string
+  colophon?: boolean | string
   reviewMode: ReviewMode
   activeSheetId: SheetId
   sheetOrder: SheetId[]

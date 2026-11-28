@@ -58,6 +58,7 @@ export interface BlockTrayProps {
   allBlockIds: BlockId[]
   assets: Record<AssetId, AssetMeta>
   selectedBlockId: BlockId | null
+  focusRequest?: { blockId: BlockId; nonce: number } | null
   busy: boolean
   onSelectBlock: (blockId: BlockId | null) => void
   onInsertBlock: (sheetId: SheetId, block: Record<string, unknown>, afterBlockId?: BlockId) => Promise<void>
@@ -94,6 +95,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
     allBlockIds,
     assets,
     selectedBlockId,
+    focusRequest,
     busy,
     onSelectBlock,
     onInsertBlock,
@@ -540,6 +542,7 @@ export function BlockTray(props: BlockTrayProps): ReactNode {
                   allBlockIds={allBlockIds}
                   assets={assets}
                   busy={busy}
+                  focusNonce={focusRequest?.blockId === block.id ? focusRequest.nonce : undefined}
                   onCommitPatch={onPatchBlock}
                   onUploadAsset={onUploadAsset}
                 />

@@ -15,6 +15,7 @@ import type {
   HeaderBlock,
   Inline,
   LayoutSlot,
+  ProofHitBand,
 } from '../shared/types.ts'
 
 export const WIDE_PANE_MIN_PX = 480
@@ -394,4 +395,21 @@ export function draftBufferToPatch(draft: BlockDraftBuffer): Record<string, unkn
   }
 
   return patch
+}
+
+/**
+ * Convert a page-local `ProofHitBand` (`pt`) into clamped CSS percentages `[0..100]`
+ * over the rendered SVG page height (`pageHeightPt`) for `ProofView` overlay hit-targets.
+ */
+export function hitBandToPercentRect(
+  band: ProofHitBand,
+  pageHeightPt: number,
+): { topPct: number; heightPct: number } {
+  const h = pageHeightPt > 0 ? pageHeightPt : 841.89
+  const rawTop = Math.max(0, Math.min(100, (band.yTopPt / h) * 100))
+  const rawBottom = Math.max(rawTop + 1.2, Math.min(100, (band.yBottomPt / h) * 100))
+  return {
+    topPct: Math.round(rawTop * 100) / 100,
+    heightPct: Math.round(Math.max(1.2, rawBottom - rawTop) * 100) / 100,
+  }
 }

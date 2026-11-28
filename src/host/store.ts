@@ -356,6 +356,42 @@ export class GalleyStore {
     return packet
   }
 
+  setColophon(
+    id: string,
+    colophon: boolean | string | null | undefined,
+    actor: 'human' | 'agent' = 'human',
+  ): GalleyPacket {
+    if (
+      colophon !== null &&
+      colophon !== undefined &&
+      typeof colophon !== 'boolean' &&
+      typeof colophon !== 'string'
+    ) {
+      throw new StoreError('invalid_op', 'colophon must be boolean, string, or null')
+    }
+    const packet = this.load(id)
+    if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
+    if (colophon === true) {
+      packet.colophon = true
+    } else if (typeof colophon === 'string' && colophon.trim().length > 0) {
+      packet.colophon = colophon.trim()
+    } else {
+      delete packet.colophon
+    }
+    packet.rev += 1
+    packet.updatedAt = new Date().toISOString()
+    this.atomicWrite(this.packetPath(id), JSON.stringify(packet, null, 2))
+    const journal = this.readJson<GalleyJournalEntry[]>(this.journalPath(id), [])
+    journal.push({
+      rev: packet.rev,
+      at: packet.updatedAt,
+      actor,
+      note: `colophon ${packet.colophon === undefined ? 'off' : JSON.stringify(packet.colophon)} (${actor})`,
+    })
+    this.atomicWrite(this.journalPath(id), JSON.stringify(journal.slice(-JOURNAL_KEEP)))
+    return packet
+  }
+
   duplicatePacket(id: string, newTitle?: string): GalleyPacket {
     const src = this.load(id)
     if (!src) throw new StoreError('not_found', `packet ${id} not found`)
@@ -565,6 +601,7 @@ export class GalleyStore {
       title,
       description: opts?.description?.trim() || undefined,
       ...(packet.locale ? { locale: packet.locale } : {}),
+      ...(packet.colophon !== undefined ? { colophon: packet.colophon } : {}),
       source: 'workspace',
       sheets: packet.sheetOrder.map((sid) => {
         const sh = packet.sheets[sid]

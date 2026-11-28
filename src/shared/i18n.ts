@@ -23,6 +23,7 @@ export interface GalleyPrintStrings {
   groupPrefix: string
   namePrefix: string
   taskPrefix: string
+  defaultColophon: string
   calloutLabels: {
     info: string
     hint: string
@@ -72,6 +73,7 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
       groupPrefix: 'Group: ',
       namePrefix: 'Name: ',
       taskPrefix: 'Task',
+      defaultColophon: 'Typeset with dsh-galley',
       calloutLabels: {
         info: 'Info',
         hint: 'Hint',
@@ -117,6 +119,7 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
       groupPrefix: 'Klasse: ',
       namePrefix: 'Name: ',
       taskPrefix: 'Aufgabe',
+      defaultColophon: 'Gesetzt mit dsh-galley',
       calloutLabels: {
         info: 'Info',
         hint: 'Tipp',
@@ -158,4 +161,18 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
 export function getGalleyStrings(locale?: GalleyLocale | string | null): GalleyLocaleBundle {
   if (locale === 'de') return GALLEY_I18N.de
   return GALLEY_I18N.en
+}
+
+/** Resolve opt-in `colophon` (`boolean | string | undefined`) into printable text or `null` when disabled. */
+export function resolveColophonText(
+  colophon: boolean | string | null | undefined,
+  locale?: GalleyLocale | string | null,
+): string | null {
+  if (colophon === undefined || colophon === null || colophon === false) return null
+  if (colophon === true) return getGalleyStrings(locale).print.defaultColophon
+  if (typeof colophon === 'string') {
+    const trimmed = colophon.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  return null
 }

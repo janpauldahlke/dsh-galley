@@ -101,6 +101,8 @@ export function GalleyBody(props: {
 
   const [selectedSheetId, setSelectedSheetId] = useState<SheetId>('s1')
   const [selectedBlockId, setSelectedBlockId] = useState<BlockId | null>(null)
+  const [focusRequest, setFocusRequest] = useState<{ blockId: BlockId; nonce: number } | null>(null)
+  const [colophonDraft, setColophonDraft] = useState('')
   const [showMappenDrawer, setShowMappenDrawer] = useState(false)
   const [renamingPacket, setRenamingPacket] = useState(false)
   const [packetTitleDraft, setPacketTitleDraft] = useState('')
@@ -790,6 +792,72 @@ export function GalleyBody(props: {
             </div>
           )}
 
+          {/* Opt-in footer colophon (0.2.4: 7.5pt #8A8379 bottom-margin line in PDF & .docx) */}
+          {activeData && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  data-testid="galley-colophon-toggle"
+                  checked={Boolean(activeData.colophon)}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const enabled = e.target.checked
+                    if (enabled && typeof activeData.colophon === 'string') {
+                      setColophonDraft(activeData.colophon)
+                    } else if (!enabled) {
+                      setColophonDraft('')
+                    }
+                    void postJson(EDIT_ROUTE, {
+                      op: 'packet-set-colophon',
+                      colophon: enabled ? (colophonDraft.trim() || true) : false,
+                    })
+                  }}
+                />
+                <span>Footer colophon</span>
+              </label>
+              {Boolean(activeData.colophon) && (
+                <>
+                  <input
+                    aria-label="Custom colophon text"
+                    data-testid="galley-colophon-input"
+                    placeholder="Default: Typeset with dsh-galley (or custom text)…"
+                    value={
+                      colophonDraft ||
+                      (typeof activeData.colophon === 'string' ? activeData.colophon : '')
+                    }
+                    onChange={(e) => setColophonDraft(e.target.value)}
+                    style={{
+                      flex: 1,
+                      minWidth: 160,
+                      color: 'inherit',
+                      background: 'transparent',
+                      border: '1px solid rgba(128,128,128,0.32)',
+                      borderRadius: 4,
+                      padding: '2px 6px',
+                      fontSize: 11,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    data-testid="galley-colophon-apply"
+                    disabled={busy}
+                    onClick={() => {
+                      const trimmed = colophonDraft.trim()
+                      void postJson(EDIT_ROUTE, {
+                        op: 'packet-set-colophon',
+                        colophon: trimmed.length > 0 ? trimmed : true,
+                      })
+                    }}
+                    style={headerBtn}
+                  >
+                    Set
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
           {showTemplateSaveInput && activeData && (
             <div style={{ display: 'flex', gap: 4 }}>
               <input
@@ -1156,9 +1224,12 @@ export function GalleyBody(props: {
                   selectedBlockId={selectedBlockId}
                   busy={busy}
                   onSelectSheet={(sid) => setSelectedSheetId(sid)}
-                  onSelectBlock={(bid) => {
+                  onSelectBlock={(bid, opts) => {
                     setSelectedBlockId(bid)
                     if (paneMode === 'narrow') setNarrowTab('blocks')
+                    if (opts?.focusEditor) {
+                      setFocusRequest((prev) => ({ blockId: bid, nonce: (prev?.nonce ?? 0) + 1 }))
+                    }
                   }}
                   onUpdateTargetPages={(sid, tp) => {
                     void postJson(EDIT_ROUTE, { op: 'update-geometry', sheetId: sid, targetPages: tp })
@@ -1189,6 +1260,7 @@ export function GalleyBody(props: {
                   allBlockIds={allBlockIds}
                   assets={activeData.assets}
                   selectedBlockId={selectedBlockId}
+                  focusRequest={focusRequest}
                   busy={busy}
                   onSelectBlock={(bid) => setSelectedBlockId(bid)}
                   onInsertBlock={async (sid, block, afterBlockId) => {

@@ -33,7 +33,7 @@ export abstract class BaseArm implements Arm {
   protected abstract compileTyp(typ: string, shadows?: ShadowFile[]): CompiledTyp | Promise<CompiledTyp>
 
   async render(sheet: GalleySheet, packet: GalleyPacket, assetBytes?: Record<string, Buffer>): Promise<SheetRender> {
-    const cs = compileSheet(sheet, packet.assets, packet.locale)
+    const cs = compileSheet(sheet, packet.assets, packet.locale, { colophon: packet.colophon })
     const shadows = buildShadows(packet, assetBytes)
     const t0 = process.hrtime.bigint()
     let out: CompiledTyp
@@ -49,7 +49,7 @@ export abstract class BaseArm implements Arm {
     if (!out.svg || out.pages <= 0) {
       throw new ArmError('compile produced no pages')
     }
-    const receipt = deriveReceipt(out.svg, out.pages, cs.pageHeightPt, cs.targetPages, cs.anchors)
+    const receipt = deriveReceipt(out.svg, out.pages, cs.pageHeightPt, cs.targetPages, cs.anchors, cs.bottomMarginPt)
     const diagnostics: RenderDiagnostic[] = mapDiagnosticsToBlocks(cs.typ, out.diags ?? [])
     const perPage = Array.from({ length: out.pages }, () => ({ wPt: cs.pageWidthPt, hPt: cs.pageHeightPt }))
     const pageSvgs = splitSvgPages(out.svg, out.pages, perPage, `${packet.id}_${sheet.id}_r${packet.rev}`)
@@ -63,6 +63,7 @@ export abstract class BaseArm implements Arm {
       lastPageLineCount: receipt.lastPageLineCount,
       overflowLinesOnLastPage: receipt.overflowLinesOnLastPage,
       blockToPage: receipt.blockToPage,
+      hitBands: receipt.hitBands,
       diagnostics,
       compiledAtRev: packet.rev,
     }

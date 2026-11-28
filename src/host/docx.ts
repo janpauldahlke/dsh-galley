@@ -12,7 +12,7 @@ import { crc32 as nodeCrc32, deflateRawSync, inflateRawSync } from 'node:zlib'
 import { join } from 'node:path'
 import { Resvg } from '@resvg/resvg-js'
 import { BUNDLED_FONT_FILES, resolveBundledFontsDir } from './arms/fonts.ts'
-import { getGalleyStrings } from '../shared/i18n.ts'
+import { getGalleyStrings, resolveColophonText } from '../shared/i18n.ts'
 import type {
   AssetMeta,
   Block,
@@ -1049,7 +1049,7 @@ function renderBlockWithSlotXml(ctx: SheetBuildContext, block: Block): string {
 
 // ── Static & metadata OOXML part generators ─────────────────────────────────
 
-function buildContentTypesXml(mediaExts: Map<string, string>): string {
+function buildContentTypesXml(mediaExts: Map<string, string>, hasFooter = false): string {
   const defaults: string[] = [
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
     '<Default Extension="xml" ContentType="application/xml"/>',
@@ -1058,17 +1058,41 @@ function buildContentTypesXml(mediaExts: Map<string, string>): string {
   for (const [ext, mime] of sortedExts) {
     defaults.push(`<Default Extension="${escapeXml(ext)}" ContentType="${escapeXml(mime)}"/>`)
   }
+  const footerOverride = hasFooter
+    ? '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
+    : ''
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     defaults.join('') +
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    footerOverride +
     '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
     '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>' +
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
     '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
     '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>' +
     '</Types>'
+  )
+}
+
+function buildFooterXml(colophonText: string): string {
+  // 7.5pt = 15 half-points, #8A8379 subtle bottom-margin colophon line (0.2.4).
+  return (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:p>' +
+    '<w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>' +
+    '<w:r>' +
+    '<w:rPr>' +
+    '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans" w:cs="Liberation Sans"/>' +
+    '<w:color w:val="8A8379"/>' +
+    '<w:sz w:val="15"/><w:szCs w:val="15"/>' +
+    '</w:rPr>' +
+    `<w:t xml:space="preserve">${escapeXml(colophonText)}</w:t>` +
+    '</w:r>' +
+    '</w:p>' +
+    '</w:ftr>'
   )
 }
 
@@ -1084,11 +1108,16 @@ function buildRootRelsXml(): string {
   )
 }
 
-function buildDocumentRelsXml(mediaList: MediaEmbed[]): string {
+function buildDocumentRelsXml(mediaList: MediaEmbed[], hasFooter = false): string {
   const rels: string[] = [
     '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>',
     '<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>',
   ]
+  if (hasFooter) {
+    rels.push(
+      '<Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>',
+    )
+  }
   for (const m of mediaList) {
     const relTarget = m.zipPath.replace(/^word\//, '')
     rels.push(
@@ -1285,12 +1314,15 @@ export function exportSheetDocx(
     bodyParts.push('<w:p/>')
   }
 
+  const colophonText = resolveColophonText(packet.colophon, locale)
+  const footerRefXml = colophonText ? '<w:footerReference w:type="default" r:id="rIdFooter1"/>' : ''
   const lnNumXml = sectionLineNumbers
     ? `<w:lnNumType w:countBy="${Math.max(1, sectionLineNumbers.every)}" w:start="${Math.max(1, sectionLineNumbers.start ?? 1)}" w:restart="newPage"/>`
     : ''
   const orientAttr = isLandscape ? ' w:orient="landscape"' : ''
   const sectPrXml =
     '<w:sectPr>' +
+    footerRefXml +
     `<w:pgSz w:w="${pageW}" w:h="${pageH}"${orientAttr}/>` +
     `<w:pgMar w:top="${marginTop}" w:right="${marginRight}" w:bottom="${marginBottom}" w:left="${marginLeft}" w:header="708" w:footer="708" w:gutter="0"/>` +
     lnNumXml +
@@ -1309,15 +1341,19 @@ export function exportSheetDocx(
   const agentBlockIds = sheet.blocks.filter((b) => b.origin === 'agent').map((b) => b.id)
   const mediaExts = new Map<string, string>()
   for (const m of ctx.mediaList) mediaExts.set(m.ext, m.mime)
+  const hasFooter = colophonText !== null
 
   const zipEntries: ZipEntryInput[] = [
-    { name: '[Content_Types].xml', data: Buffer.from(buildContentTypesXml(mediaExts), 'utf8') },
+    { name: '[Content_Types].xml', data: Buffer.from(buildContentTypesXml(mediaExts, hasFooter), 'utf8') },
     { name: '_rels/.rels', data: Buffer.from(buildRootRelsXml(), 'utf8') },
     { name: 'docProps/app.xml', data: Buffer.from(buildAppPropsXml(), 'utf8') },
     { name: 'docProps/core.xml', data: Buffer.from(buildCorePropsXml(sheet, packet, agentBlockIds), 'utf8') },
     { name: 'docProps/custom.xml', data: Buffer.from(buildCustomPropsXml(agentBlockIds, packet.id), 'utf8') },
-    { name: 'word/_rels/document.xml.rels', data: Buffer.from(buildDocumentRelsXml(ctx.mediaList), 'utf8') },
+    { name: 'word/_rels/document.xml.rels', data: Buffer.from(buildDocumentRelsXml(ctx.mediaList, hasFooter), 'utf8') },
     { name: 'word/document.xml', data: Buffer.from(documentXml, 'utf8') },
+    ...(colophonText !== null
+      ? [{ name: 'word/footer1.xml', data: Buffer.from(buildFooterXml(colophonText), 'utf8') }]
+      : []),
     { name: 'word/numbering.xml', data: Buffer.from(buildNumberingXml(), 'utf8') },
     { name: 'word/styles.xml', data: Buffer.from(buildStylesXml(locale), 'utf8') },
     ...ctx.mediaList.map((m) => ({ name: m.zipPath, data: m.bytes, storeOnly: true })),

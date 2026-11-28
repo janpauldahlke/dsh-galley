@@ -37,9 +37,10 @@ import type {
   BlockId,
   SheetId,
   LayoutSlot,
+  ProofHitBand,
   RenderDiagnostic,
 } from '../shared/types.ts'
-import { getGalleyStrings } from '../shared/i18n.ts'
+import { getGalleyStrings, resolveColophonText } from '../shared/i18n.ts'
 
 // ── M0 legacy API (kept so the 11-test baseline + health probe stay green) ──
 
@@ -487,21 +488,28 @@ export function blockTypst(
   return lines.join('\n')
 }
 
+export interface CompileSheetOptions {
+  /** Opt-in packet/template colophon (`true` for localized neutral default, or custom string). */
+  colophon?: boolean | string | null
+}
+
 export interface CompileSheetResult {
   /** The complete, self-contained `.typ` document for the sheet. */
   typ: string
-  /** Deterministic anchor hex per block (for block→page receipt). */
+  /** Deterministic anchor hex per block (for block→page & hit-band receipt). */
   anchors: { blockId: BlockId; hex: string }[]
   /** pageHeight in pt (for the receipt page math). */
   pageHeightPt: number
   /** pageWidth in pt. */
   pageWidthPt: number
+  /** bottom margin in pt (excludes colophon footer from body line/overflow counts). */
+  bottomMarginPt: number
   /** targetPages from the sheet geometry (undefined = unbounded). */
   targetPages: number | undefined
 }
 
-/** Preamble (0.14.2 surface, spec 03 §3; M1.5 H3.2). */
-function preamble(sheet: GalleySheet, locale?: GalleyLocale): string[] {
+/** Preamble (0.14.2 surface, spec 03 §3; M1.5 H3.2; 0.2.4 opt-in colophon). */
+function preamble(sheet: GalleySheet, locale?: GalleyLocale, colophonText?: string | null): string[] {
   const g = sheet.geometry
   const m = g.margin
   const isLandscape = g.orientation === 'landscape'
@@ -511,7 +519,13 @@ function preamble(sheet: GalleySheet, locale?: GalleyLocale): string[] {
     `// galley preamble — sheet ${sheet.id} "${sheet.title}" (${g.paper}${isLandscape ? ' landscape' : ''}, margins ${m.top}/${m.right}/${m.bottom}/${m.left} cm)`,
   )
   const flippedArg = isLandscape ? ', flipped: true' : ''
-  L.push(`#set page(paper: ${typString(g.paper)}${flippedArg}, margin: (top: ${m.top}cm, bottom: ${m.bottom}cm, left: ${m.left}cm, right: ${m.right}cm))`)
+  // Opt-in colophon footer: 7.5pt #8A8379 (`rgb(138, 131, 121)`) in bottom margin.
+  const footerArg = colophonText
+    ? `, footer: align(left)[#text(size: 7.5pt, fill: rgb(138, 131, 121), ${typString(colophonText)})]`
+    : ''
+  L.push(
+    `#set page(paper: ${typString(g.paper)}${flippedArg}, margin: (top: ${m.top}cm, bottom: ${m.bottom}cm, left: ${m.left}cm, right: ${m.right}cm)${footerArg})`,
+  )
   L.push(`#set text(size: 10pt, font: ("Liberation Sans", "Liberation Serif", "Libertinus Serif"), lang: ${typString(typstLang)})`)
   L.push(`#show raw: set text(font: ("Liberation Mono", "DejaVu Sans Mono"))`)
   L.push(`#show math.equation: set text(font: ("New Computer Modern Math", "Noto Sans Math"))`)
@@ -529,17 +543,20 @@ function preamble(sheet: GalleySheet, locale?: GalleyLocale): string[] {
   return L
 }
 
-/** Deterministic pure function: sheet → `.typ` (spec 03 §4; M1.6). */
+/** Deterministic pure function: sheet → `.typ` (spec 03 §4; M1.6; 0.2.4 colophon). */
 export function compileSheet(
   sheet: GalleySheet,
   assets?: Record<string, unknown>,
   locale?: GalleyLocale,
+  opts?: CompileSheetOptions,
 ): CompileSheetResult {
   const rawDim = PAPER_PT[sheet.geometry.paper]
   const isLandscape = sheet.geometry.orientation === 'landscape'
   const pageWidthPt = isLandscape ? rawDim.h : rawDim.w
   const pageHeightPt = isLandscape ? rawDim.w : rawDim.h
-  const lines: string[] = [...preamble(sheet, locale), '']
+  const bottomMarginPt = Math.round(sheet.geometry.margin.bottom * PT_PER_CM * 100) / 100
+  const colophonText = resolveColophonText(opts?.colophon, locale)
+  const lines: string[] = [...preamble(sheet, locale, colophonText), '']
   const anchors: { blockId: BlockId; hex: string }[] = []
   let taskCount = 0
   sheet.blocks.forEach((block, i) => {
@@ -553,6 +570,7 @@ export function compileSheet(
     anchors,
     pageHeightPt,
     pageWidthPt,
+    bottomMarginPt,
     targetPages: sheet.geometry.targetPages,
   }
 }
@@ -622,24 +640,33 @@ export function clusterLines(ys: number[], tol = 2.5): number[] {
   return out
 }
 
-function countVisualLinesInSvgSlice(svgSlice: string): number {
-  const re = /<(\/?)g\b((?:"[^"]*"|'[^']*'|[^"'>])*)\/?>/g
+interface PageSliceMetrics {
+  lineCount: number
+  maxContentYPt: number
+  anchors: { hex: string; yPt: number }[]
+}
+
+function parsePageSliceMetrics(svgSlice: string, maxBodyYPt?: number): PageSliceMetrics {
+  const re = /<(\/?)(g|path|image)\b((?:"[^"]*"|'[^']*'|[^"'>])*)\/?>/g
   const stack: { ay: number; sy: number }[] = []
   const textYs: number[] = []
+  const anchors: { hex: string; yPt: number }[] = []
+  let maxContentYPt = 0
   let m: RegExpExecArray | null
   while ((m = re.exec(svgSlice)) !== null) {
     const closing = m[1] === '/'
-    const attrs = m[2] || ''
+    const name = m[2]
+    const attrs = m[3] || ''
     const selfClose = /\/\s*>$/.test(m[0])
     if (closing) {
-      stack.pop()
+      if (name === 'g') stack.pop()
       continue
     }
     let y = 0
     let sy = 1
     // Ignore the outer `<g class="typst-page" transform="translate(0, pageY)">` offset so
-    // coordinates stay page-local.
-    const isPageRoot = /\bclass="typst-page"/.test(attrs)
+    // coordinates stay strictly page-local (`0..pageHeightPt`).
+    const isPageRoot = name === 'g' && /\bclass="typst-page"/.test(attrs)
     const tr = !isPageRoot ? attrs.match(/transform="([^"]*)"/) : null
     if (tr) {
       const t = tr[1].match(/translate\(([-\d.]+)[,\s]+([-\d.]+)\)/)
@@ -648,65 +675,90 @@ function countVisualLinesInSvgSlice(svgSlice: string): number {
       if (sc) sy = +sc[2]
     }
     const parent = stack[stack.length - 1]
+    const curSy = (parent ? parent.sy : 1) * sy
     const ay = (parent ? parent.ay : 0) + (parent ? parent.sy : 1) * y
-    if (/\bclass="typst-text"/.test(attrs)) {
-      textYs.push(Math.round(ay * 100) / 100)
-    }
-    if (!selfClose) {
-      stack.push({ ay, sy: (parent ? parent.sy : 1) * sy })
+    const roundedY = Math.round(ay * 100) / 100
+
+    if (name === 'g') {
+      if (/\bclass="typst-text"/.test(attrs)) {
+        if (maxBodyYPt === undefined || roundedY <= maxBodyYPt + 3) {
+          textYs.push(roundedY)
+          if (roundedY > maxContentYPt) maxContentYPt = roundedY
+        }
+      }
+      if (!selfClose) {
+        stack.push({ ay, sy: curSy })
+      }
+    } else if (name === 'image') {
+      const hm = attrs.match(/\bheight="([\d.]+)"/)
+      const imgBottom = roundedY + (hm ? Math.abs(curSy) * Number(hm[1]) : 0)
+      if ((maxBodyYPt === undefined || imgBottom <= maxBodyYPt + 6) && imgBottom > maxContentYPt) {
+        maxContentYPt = Math.round(imgBottom * 100) / 100
+      }
+    } else if (name === 'path' && /\bclass="typst-shape"/.test(attrs)) {
+      const fill = attrs.match(/fill="([^"]+)"/)
+      if (fill) {
+        let anchorY = roundedY
+        if (!tr) {
+          const dm = attrs.match(/\bd="M\s*[-\d.]+[,\s]+([-\d.]+)/)
+          if (dm) anchorY = Math.round((ay + (parent ? parent.sy : 1) * Number(dm[1])) * 100) / 100
+        }
+        anchors.push({ hex: fill[1], yPt: anchorY })
+      }
     }
   }
-  return clusterLines(textYs, 2.5).length
+  return {
+    lineCount: clusterLines(textYs, 2.5).length,
+    maxContentYPt,
+    anchors,
+  }
 }
 
 /**
- * Robust page-aware SVG parse (M1 + M4.0.1 y-clustered line tally).
+ * Robust page-aware SVG parse (M1 + M4.0.1 y-clustered line tally + 0.2.4 page-local anchor yPt).
  * Typst's stacked SVG wraps each page in `<g class="typst-page" transform="translate(x, y)">`;
- * these groups are sequential and non-overlapping, so an anchor's page index = count of
- * `typst-page` starts at/before its byte offset, minus 1. Within each page segment,
- * `<g class="typst-text">` runs are y-clustered (`tol = 2.5pt`) so multi-column table rows
- * and inline bold/italic spans count as 1 physical visual line rather than N text spans.
+ * within each page segment, `<g class="typst-text">` runs are y-clustered (`tol = 2.5pt`) while
+ * excluding bottom-margin colophon footers (`maxBodyYPt`), and `#010000..#ff0000` anchors retain
+ * their exact page-local `yPt` for `ProofView` click-to-block hit-bands.
  */
-export function parseSvgPages(svg: string): {
+export function parseSvgPages(
+  svg: string,
+  opts?: { maxBodyYPt?: number },
+): {
   pageCount: number
   linesPerPage: number[]
-  anchors: { hex: string; page: number }[]
+  maxContentYPerPage: number[]
+  anchors: { hex: string; page: number; yPt: number }[]
 } {
   const pageStarts: number[] = []
   const pageRe = /<g class="typst-page"/g
   let pm: RegExpExecArray | null
   while ((pm = pageRe.exec(svg)) !== null) pageStarts.push(pm.index)
   const pageCount = Math.max(1, pageStarts.length)
-  const pageOf = (off: number): number => {
-    let n = 0
-    for (const s of pageStarts) if (s <= off) n++
-    return Math.max(0, Math.min(pageCount - 1, n - 1))
-  }
 
   const linesPerPage = new Array<number>(pageCount).fill(0)
+  const maxContentYPerPage = new Array<number>(pageCount).fill(0)
+  const anchors: { hex: string; page: number; yPt: number }[] = []
+
   if (pageStarts.length === 0) {
-    linesPerPage[0] = countVisualLinesInSvgSlice(svg)
+    const m = parsePageSliceMetrics(svg, opts?.maxBodyYPt)
+    linesPerPage[0] = m.lineCount
+    maxContentYPerPage[0] = m.maxContentYPt
+    for (const a of m.anchors) anchors.push({ hex: a.hex, page: 0, yPt: a.yPt })
   } else {
     const closeSvg = svg.lastIndexOf('</svg>')
     const endBound = closeSvg > pageStarts[0] ? closeSvg : svg.length
     for (let p = 0; p < pageStarts.length; p++) {
       const start = pageStarts[p]
       const end = p + 1 < pageStarts.length ? pageStarts[p + 1] : endBound
-      linesPerPage[p] = countVisualLinesInSvgSlice(svg.slice(start, end))
+      const m = parsePageSliceMetrics(svg.slice(start, end), opts?.maxBodyYPt)
+      linesPerPage[p] = m.lineCount
+      maxContentYPerPage[p] = m.maxContentYPt
+      for (const a of m.anchors) anchors.push({ hex: a.hex, page: p, yPt: a.yPt })
     }
   }
 
-  const anchors: { hex: string; page: number }[] = []
-  const pathRe = /<path\b((?:"[^"]*"|'[^']*'|[^"'>])*)>/g
-  let tm: RegExpExecArray | null
-  while ((tm = pathRe.exec(svg)) !== null) {
-    const attrs = tm[1] || ''
-    if (/class="typst-shape"/.test(attrs)) {
-      const fill = attrs.match(/fill="([^"]+)"/)
-      if (fill) anchors.push({ hex: fill[1], page: pageOf(tm.index) })
-    }
-  }
-  return { pageCount, linesPerPage, anchors }
+  return { pageCount, linesPerPage, maxContentYPerPage, anchors }
 }
 
 function scopeTypstCss(svgFragment: string): string {
@@ -818,17 +870,72 @@ export interface Receipt {
   lastPageLineCount: number
   overflowLinesOnLastPage: number
   blockToPage: Record<BlockId, number>
+  hitBands: ProofHitBand[]
 }
 
-/** Pure receipt math: stacked SVG + anchors → per-page lines + block→page. */
+/** Compute non-overlapping page-local `(pageIndex, yTopPt, yBottomPt, blockId)` bands from matched SVG anchors. */
+export function deriveHitBands(
+  anchors: { blockId: BlockId; hex: string }[],
+  found: { hex: string; page: number; yPt: number }[],
+  pageHeightPt: number,
+  bottomMarginPt = 56.69,
+  maxContentYPerPage: number[] = [],
+): ProofHitBand[] {
+  const byPage = new Map<number, { blockId: BlockId; yPt: number; docIdx: number }[]>()
+  anchors.forEach((a, docIdx) => {
+    const targetHex = a.hex.toLowerCase()
+    const hit = found.find((f) => f.hex.toLowerCase() === targetHex)
+    if (!hit) return
+    const list = byPage.get(hit.page) ?? []
+    list.push({ blockId: a.blockId, yPt: hit.yPt, docIdx })
+    byPage.set(hit.page, list)
+  })
+
+  const bands: ProofHitBand[] = []
+  const sortedPages = [...byPage.keys()].sort((a, b) => a - b)
+  const safePageH = pageHeightPt > 0 ? pageHeightPt : 841.89
+  const bodyLimit = Math.max(48, safePageH - Math.max(0, bottomMarginPt))
+
+  for (const pageIndex of sortedPages) {
+    const items = byPage.get(pageIndex)!
+    items.sort((a, b) => (a.yPt !== b.yPt ? a.yPt - b.yPt : a.docIdx - b.docIdx))
+    const pageMaxY = maxContentYPerPage[pageIndex] ?? 0
+
+    for (let k = 0; k < items.length; k++) {
+      const cur = items[k]
+      const next = items[k + 1]
+      const yTop = Math.max(0, Math.min(safePageH - 12, Math.round((cur.yPt - 3) * 100) / 100))
+      let yBottom: number
+      if (next) {
+        yBottom = Math.max(yTop + 12, Math.round((next.yPt - 2) * 100) / 100)
+      } else {
+        const contentBottom = pageMaxY > yTop ? pageMaxY + 14 : yTop + 34
+        yBottom = Math.min(bodyLimit, Math.max(yTop + 18, contentBottom))
+      }
+      yBottom = Math.min(safePageH, Math.max(yTop + 10, Math.round(yBottom * 100) / 100))
+      bands.push({
+        pageIndex,
+        yTopPt: yTop,
+        yBottomPt: yBottom,
+        blockId: cur.blockId,
+      })
+    }
+  }
+  return bands
+}
+
+/** Pure receipt math: stacked SVG + anchors → per-page lines + block→page + hitBands. */
 export function deriveReceipt(
   svg: string,
   pages: number,
-  _pageHeightPt: number,
+  pageHeightPt: number,
   targetPages: number | undefined,
   anchors: { blockId: BlockId; hex: string }[],
+  bottomMarginPt = 56.69,
 ): Receipt {
-  const { linesPerPage, anchors: found } = parseSvgPages(svg)
+  const safePageH = pageHeightPt > 0 ? pageHeightPt : 841.89
+  const maxBodyYPt = Math.max(48, safePageH - Math.max(0, bottomMarginPt))
+  const { linesPerPage, maxContentYPerPage, anchors: found } = parseSvgPages(svg, { maxBodyYPt })
   // Per-page line counts, padded/truncated to the authoritative page count
   // (the arm's numOfPages, which is the truth — the SVG may omit trailing
   // blank pages).
@@ -839,10 +946,12 @@ export function deriveReceipt(
     targetPages !== undefined && pages > targetPages ? lastPageLineCount : 0
   const blockToPage: Record<BlockId, number> = {}
   for (const a of anchors) {
-    const hit = found.find((f) => f.hex === a.hex)
+    const targetHex = a.hex.toLowerCase()
+    const hit = found.find((f) => f.hex.toLowerCase() === targetHex)
     blockToPage[a.blockId] = hit ? hit.page : 0
   }
-  return { pages, perPage, lastPageLineCount, overflowLinesOnLastPage, blockToPage }
+  const hitBands = deriveHitBands(anchors, found, safePageH, bottomMarginPt, maxContentYPerPage)
+  return { pages, perPage, lastPageLineCount, overflowLinesOnLastPage, blockToPage, hitBands }
 }
 
 /**

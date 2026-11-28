@@ -78,7 +78,7 @@ function makeDeps(cwd, registry = new GalleyServiceRegistry(), onRender = null) 
 }
 
 test('Finding 1: Brand-new chat never leaks another session packet across inject, tools, or HTTP + confines session cwd', async () => {
-  assert.equal(VERSION, '0.2.3')
+  assert.match(VERSION, /^0\.2\.\d+$/)
   const wsA = join(tmpRoot, 'ws-course-a')
   const outsideDir = join(tmpRoot, 'outside-escape')
   const registry = new GalleyServiceRegistry()

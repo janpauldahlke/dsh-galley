@@ -13,7 +13,7 @@ import type {
   StateSheetView,
 } from '../shared/types.ts'
 import { getGalleyStrings } from '../shared/i18n.ts'
-import { decodeSvgDataUri, formatOverflowBanner } from './paneModel.ts'
+import { decodeSvgDataUri, formatOverflowBanner, hitBandToPercentRect } from './paneModel.ts'
 
 export interface ProofViewProps {
   sheets: StateSheetView[]
@@ -22,7 +22,7 @@ export interface ProofViewProps {
   selectedBlockId: BlockId | null
   busy?: boolean
   onSelectSheet: (sheetId: SheetId) => void
-  onSelectBlock: (blockId: BlockId) => void
+  onSelectBlock: (blockId: BlockId, opts?: { focusEditor?: boolean }) => void
   onUpdateTargetPages: (sheetId: SheetId, targetPages: number | null) => void
   onUpdateOrientation: (sheetId: SheetId, orientation: 'portrait' | 'landscape') => void
   onAddSheet: (title?: string) => void
@@ -74,6 +74,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
   const [zoom, setZoom] = useState<ZoomLevel>('fit')
   const [renamingSheet, setRenamingSheet] = useState(false)
   const [sheetTitleDraft, setSheetTitleDraft] = useState('')
+  const [hoveredBlockId, setHoveredBlockId] = useState<BlockId | null>(null)
 
   const activeSheet = sheets.find((s) => s.id === selectedSheetId) ?? sheets[0]
   const activeProof = proofs.find((p) => p.sheetId === activeSheet?.id)
@@ -339,6 +340,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
             : null
           const isFocusedPage = selectedBlockPage === idx
           const pageBlocks = blocksByPage.get(idx) ?? []
+          const pageHitBands = (activeProof?.hitBands ?? []).filter((b) => b.pageIndex === idx)
 
           const widthStyle: CSSProperties =
             zoom === 'fit'
@@ -358,6 +360,7 @@ export function ProofView(props: ProofViewProps): ReactNode {
             >
               <div
                 style={{
+                  position: 'relative',
                   background: '#ffffff',
                   color: '#000000',
                   borderRadius: 3,
@@ -367,8 +370,71 @@ export function ProofView(props: ProofViewProps): ReactNode {
                     : '0 2px 10px rgba(0,0,0,0.16)',
                   border: overflowText ? '1.5px solid #d97706' : '1px solid rgba(128,128,128,0.25)',
                 }}
-                dangerouslySetInnerHTML={{ __html: svgMarkup }}
-              />
+              >
+                <div dangerouslySetInnerHTML={{ __html: svgMarkup }} />
+
+                {/* Direct-manipulation paper hit-bands (0.2.4: hover highlight + click-to-textarea focus) */}
+                {pageHitBands.map((band) => {
+                  const { topPct, heightPct } = hitBandToPercentRect(band, dims.hPt)
+                  const isHovered = hoveredBlockId === band.blockId
+                  const isSelected = selectedBlockId === band.blockId
+                  return (
+                    <button
+                      key={`${idx}-${band.blockId}`}
+                      type="button"
+                      data-testid={`galley-hitband-${band.blockId}-p${idx + 1}`}
+                      aria-label={`Focus block ${band.blockId}`}
+                      title={`Click to edit block ${band.blockId}`}
+                      onMouseEnter={() => setHoveredBlockId(band.blockId)}
+                      onMouseLeave={() => setHoveredBlockId((cur) => (cur === band.blockId ? null : cur))}
+                      onClick={() => onSelectBlock(band.blockId, { focusEditor: true })}
+                      style={{
+                        position: 'absolute',
+                        left: '3%',
+                        right: '3%',
+                        top: `${topPct}%`,
+                        height: `${heightPct}%`,
+                        padding: 0,
+                        margin: 0,
+                        cursor: 'pointer',
+                        borderRadius: 3,
+                        background: isHovered
+                          ? 'rgba(59, 130, 246, 0.10)'
+                          : isSelected
+                            ? 'rgba(59, 130, 246, 0.05)'
+                            : 'transparent',
+                        border: isHovered
+                          ? '1px dashed rgba(37, 99, 235, 0.65)'
+                          : '1px solid transparent',
+                        borderLeft: isHovered || isSelected
+                          ? '2.5px solid rgba(37, 99, 235, 0.85)'
+                          : '2.5px solid transparent',
+                        transition: 'background 90ms ease, border-color 90ms ease',
+                      }}
+                    >
+                      {(isHovered || isSelected) && (
+                        <span
+                          style={{
+                            position: 'absolute',
+                            top: 2,
+                            right: 3,
+                            fontSize: 9,
+                            fontWeight: 700,
+                            lineHeight: 1.2,
+                            padding: '1px 4px',
+                            borderRadius: 3,
+                            background: 'rgba(37, 99, 235, 0.88)',
+                            color: '#ffffff',
+                            pointerEvents: 'none',
+                          }}
+                        >
+                          {band.blockId}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
 
               {/* Page footer */}
               <div

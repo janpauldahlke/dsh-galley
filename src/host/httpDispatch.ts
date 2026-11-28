@@ -230,6 +230,7 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
         targetPages: tp ?? null,
         targetPagesMet: tp !== undefined ? false : null,
         blockToPage: {},
+        hitBands: [],
         compiledAtRev: packet.rev,
         svgPages: [],
         compileError: null,
@@ -250,13 +251,14 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
         targetPages: tp ?? null,
         targetPagesMet: tp !== undefined ? sr.pages <= tp : null,
         blockToPage: sr.blockToPage ?? {},
+        hitBands: sr.hitBands ?? [],
         compiledAtRev: packet.rev,
         svgPages,
         compileError: null,
       })
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      const cs = compileSheet(sheet, packet.assets)
+      const cs = compileSheet(sheet, packet.assets, packet.locale, { colophon: packet.colophon })
       const mapped = mapDiagnosticsToBlocks(cs.typ, [{ message: msg }])
       proofs.push({
         sheetId: sid,
@@ -267,6 +269,7 @@ async function compilePacketProofs(deps: GalleyToolsDeps, packet: GalleyPacket):
         targetPages: tp ?? null,
         targetPagesMet: tp !== undefined ? false : null,
         blockToPage: {},
+        hitBands: [],
         compiledAtRev: packet.rev,
         svgPages: [],
         compileError: { message: msg, blockId: mapped[0]?.blockId ?? null },
@@ -387,6 +390,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       packetId: packet.id,
       template: packet.template,
       title: packet.title,
+      ...(packet.colophon !== undefined ? { colophon: packet.colophon } : {}),
       reviewMode: packet.reviewMode ?? 'auto',
       activeSheetId: packet.sheetOrder[0] ?? 's1',
       sheetOrder: packet.sheetOrder,
@@ -434,6 +438,9 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
             template: typeof body.template === 'string' ? body.template : undefined,
             title: typeof body.title === 'string' ? body.title : undefined,
             locale: body.locale === 'de' ? 'de' : body.locale === 'en' ? 'en' : undefined,
+            ...(typeof body.colophon === 'boolean' || typeof body.colophon === 'string'
+              ? { colophon: body.colophon }
+              : {}),
             orientation: body.orientation === 'landscape' ? 'landscape' : body.orientation === 'portrait' ? 'portrait' : undefined,
             targetPages: typeof body.targetPages === 'number' ? body.targetPages : undefined,
             blocks: Array.isArray(body.blocks) ? (body.blocks as Record<string, unknown>[]) : undefined,
@@ -511,6 +518,26 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         const mode = body.reviewMode as ReviewMode
         const updated = store.setReviewMode(pid, mode, source)
         sendJson(res, 200, { ok: true, packetId: pid, rev: updated.rev, reviewMode: updated.reviewMode ?? 'auto' })
+        return
+      }
+      if (op === 'packet-set-colophon') {
+        const rawColophon = body.colophon
+        if (
+          rawColophon !== null &&
+          rawColophon !== undefined &&
+          typeof rawColophon !== 'boolean' &&
+          typeof rawColophon !== 'string'
+        ) {
+          sendFailure(res, { ok: false, code: Err.INVALID_PARAMS, message: 'colophon must be boolean, string, or null' })
+          return
+        }
+        const updated = store.setColophon(pid, rawColophon as boolean | string | null | undefined, source)
+        sendJson(res, 200, {
+          ok: true,
+          packetId: pid,
+          rev: updated.rev,
+          colophon: updated.colophon ?? false,
+        })
         return
       }
       if (op === 'template-save') {
