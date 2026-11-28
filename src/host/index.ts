@@ -493,6 +493,8 @@ export function registerGalleyTools(ctx: Context): () => void {
       packetId: { type: 'string' },
       sheetId: { type: 'string' },
       rev: { type: 'integer' },
+      proof: { type: 'object' },
+      proofs: { type: 'object' },
       staleDependents: { type: 'array', items: { type: 'string' } },
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {

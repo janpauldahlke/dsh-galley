@@ -1,6 +1,6 @@
 {
   "name": "dsh-galley",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Shared volatile document workbench & typesetter (Druck und Satz) for human + agent co-authoring in DeepSeek Harness. Block-addressed galley packets, instant Typst A4 proof, deterministic PDF/DOCX/TYP exporters.",
   "type": "module",
   "main": "lib/index.js",

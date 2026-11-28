@@ -1880,6 +1880,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
         block: null,
         proposal: { id: prop.id, op: prop.op ?? 'patch', targetBlockId: prop.targetBlockId, status: 'pending' },
         proof: proofProp,
+        proofs: { [propSheetId]: proofProp },
         staleDependents: staleBlockIds(loadedProp),
       }
     }
@@ -1922,6 +1923,7 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
       block,
       proposal: null,
       proof,
+      proofs: { [touchedSheetId]: proof },
       staleDependents: staleBlockIds(loaded),
     }
   } catch (e) {

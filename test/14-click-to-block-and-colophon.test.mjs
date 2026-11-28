@@ -63,7 +63,7 @@ function makeDeps(cwd, registry = new GalleyServiceRegistry()) {
 }
 
 test('0.2.4 Item 1: Direct-manipulation hit-bands partition multi-page Typst SVG anchors without leaking into LLM receipts', async () => {
-  assert.equal(VERSION, '0.2.4')
+  assert.equal(VERSION, '0.2.5')
   const ws = join(tmpRoot, 'ws-hitbands')
   const registry = new GalleyServiceRegistry()
   const { deps } = makeDeps(ws, registry)

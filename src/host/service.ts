@@ -97,6 +97,11 @@ export interface GalleyService {
   registerTemplate(blueprint: GalleyTemplateBlueprint): () => void
   listTemplates(cwd?: string): GalleyTemplateBlueprint[]
   registerPreflight(id: string, check: GalleyPreflightCheckFn): () => void
+  runPreflight(
+    packet: GalleyPacket,
+    proofs?: Record<SheetId, { overflowLinesOnLastPage?: number } | null>,
+    cwd?: string,
+  ): GalleyPreflightWarning[]
   getStore(cwd?: string): GalleyStore
   getSessionPacketId(cwd: string | undefined, sessionId: string): PacketId | null
   setSessionPacketId(cwd: string | undefined, sessionId: string, packetId: PacketId): void
@@ -304,6 +309,10 @@ export class GalleyServiceRegistry {
         return this.listTemplates(store)
       },
       registerPreflight: (id, check) => this.registerPreflight(id, check),
+      runPreflight: (packet, proofs, cwd) => {
+        const resolvedCwd = cwd ?? getStoreForCwd(undefined).cwd
+        return this.runPreflight(packet, proofs, resolvedCwd)
+      },
       getStore: (cwd) => getStoreForCwd(cwd).store,
       getSessionPacketId: (cwd, sessionId) => {
         const { root } = getStoreForCwd(cwd)
