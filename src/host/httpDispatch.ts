@@ -40,6 +40,7 @@ import {
   galleyExport,
   galleyOpen,
   mapError,
+  type BatchBlockOp,
   type GalleyToolsDeps,
   type ToolFailure,
 } from './tools.ts'
@@ -92,6 +93,7 @@ export function httpStatusForCode(code: string): number {
     case Err.ANNOTATION_NOT_FOUND:
       return 404
     case Err.PROPOSAL_CONFLICT:
+    case Err.EXPORT_BLOCKED_BY_PREFLIGHT:
       return 409
     case Err.INVALID_PARAMS:
     case Err.BLOCK_TYPE_MISMATCH:
@@ -113,6 +115,7 @@ function sendFailure(res: ServerResponse, failure: ToolFailure): void {
     code: failure.code,
     message: failure.message,
     fields,
+    ...(failure.preflightWarnings ? { preflightWarnings: failure.preflightWarnings } : {}),
   })
 }
 
@@ -169,8 +172,10 @@ function resolveHttpPacketId(
 ): string | null {
   if (explicitPid !== undefined) return explicitPid
   if (sessionId) {
-    const pinned = getSessionActivePacket(root, sessionId)
-    if (pinned) return pinned
+    // Never fall back to workspace-global `store.getActivePacket()` when a chat
+    // `sessionId` is present — keeps the rightbar pane and agent tools in lockstep
+    // so a brand-new chat shows the empty-state picker instead of another chat's packet.
+    return getSessionActivePacket(root, sessionId)
   }
   return store.getActivePacket()
 }
@@ -682,6 +687,27 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         return
       }
 
+      // 6a. Atomic batch writer op (`op: 'batch'`)
+      if (op === 'batch') {
+        const explicitSheetId = typeof body.sheetId === 'string' ? (body.sheetId as SheetId) : undefined
+        const result = await galleyEditBlock(
+          { ...deps, registry },
+          {
+            packetId: pid,
+            ...(explicitSheetId !== undefined ? { sheetId: explicitSheetId } : {}),
+            op: 'batch',
+            origin: source,
+            ops: Array.isArray(body.ops) ? (body.ops as BatchBlockOp[]) : undefined,
+          },
+        )
+        if (!result.ok) {
+          sendFailure(res, result)
+          return
+        }
+        sendJson(res, 200, result)
+        return
+      }
+
       // 6. Standard writer ops: insert | patch | move | remove
       if (op === 'insert' || op === 'patch' || op === 'move' || op === 'remove') {
         const blockId = typeof body.blockId === 'string' ? body.blockId : undefined
@@ -887,15 +913,27 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
         : undefined
     const sheetId = typeof body.sheetId === 'string' ? body.sheetId : undefined
     const explicitPacketId = typeof body.packetId === 'string' ? body.packetId : undefined
-    const resolvedPacketId = resolveHttpPacketId(root, deps.store, explicitPacketId, sessionId) ?? undefined
+    const hasSession = Boolean(sessionId)
+    const resolvedPacketId = resolveHttpPacketId(root, deps.store, explicitPacketId, sessionId)
+    if (hasSession && !resolvedPacketId) {
+      sendFailure(res, { ok: false, code: Err.NO_ACTIVE_PACKET, message: 'no active packet bound to this session' })
+      return
+    }
+    const source: 'human' | 'agent' = body.source === 'agent' || body.origin === 'agent' ? 'agent' : 'human'
+    const force = body.force === true
 
-    const result = await galleyExport(deps, {
-      packetId: resolvedPacketId,
-      sheetId,
-      sheetIds,
-      format,
-      outDir: cwd,
-    })
+    const result = await galleyExport(
+      { ...deps, registry },
+      {
+        packetId: resolvedPacketId ?? undefined,
+        sheetId,
+        sheetIds,
+        format,
+        outDir: cwd,
+        origin: source,
+        force,
+      },
+    )
     if (!result.ok) {
       sendFailure(res, result)
       return
@@ -905,6 +943,7 @@ export function createGalleyHttpDispatcher(hostDeps: GalleyHttpDispatcherDeps) {
       packetId: resolvedPacketId ?? deps.store.getActivePacket(),
       format: result.format,
       files: result.files ?? [],
+      preflightWarnings: result.preflightWarnings,
     })
   }
 

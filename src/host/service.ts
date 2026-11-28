@@ -206,17 +206,28 @@ export class GalleyServiceRegistry {
       }
     }
 
-    // 2b. Unsupported keys passed on `header.fields` (surfaced instead of silent drop)
+    // 2b. Empty header title & unsupported keys passed on `header.fields`
     for (const sid of packet.sheetOrder) {
       for (const b of packet.sheets[sid]?.blocks ?? []) {
-        if (b.type === 'header' && Array.isArray(b.fields?._unknownKeys) && b.fields._unknownKeys.length > 0) {
-          warnings.push({
-            code: 'GALLEY_UNKNOWN_HEADER_FIELD',
-            severity: 'warn',
-            sheetId: sid,
-            blockId: b.id,
-            message: pf.unknownHeaderFields(b.id, b.fields._unknownKeys),
-          })
+        if (b.type === 'header') {
+          if (!(b.fields?.titel ?? '').trim()) {
+            warnings.push({
+              code: 'GALLEY_EMPTY_HEADER_TITLE',
+              severity: 'warn',
+              sheetId: sid,
+              blockId: b.id,
+              message: pf.emptyHeaderTitle(b.id),
+            })
+          }
+          if (Array.isArray(b.fields?._unknownKeys) && b.fields._unknownKeys.length > 0) {
+            warnings.push({
+              code: 'GALLEY_UNKNOWN_HEADER_FIELD',
+              severity: 'warn',
+              sheetId: sid,
+              blockId: b.id,
+              message: pf.unknownHeaderFields(b.id, b.fields._unknownKeys),
+            })
+          }
         }
       }
     }
@@ -267,13 +278,18 @@ export class GalleyServiceRegistry {
       }
     }
 
-    // 5. Companion leaf-plugin checks (fail-open so a third-party check never breaks the host)
-    for (const [, fn] of this.preflightChecks) {
+    // 5. Companion leaf-plugin checks (isolated: throwing checkers surface GALLEY_PREFLIGHT_INTERNAL)
+    for (const [id, fn] of this.preflightChecks) {
       try {
         const extra = fn(packet, cwd)
         if (Array.isArray(extra)) warnings.push(...extra)
-      } catch {
-        /* fail-open */
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        warnings.push({
+          code: 'GALLEY_PREFLIGHT_INTERNAL',
+          severity: 'warn',
+          message: pf.preflightInternal(id, errMsg),
+        })
       }
     }
 

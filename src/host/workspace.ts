@@ -12,7 +12,6 @@ import { join } from 'node:path'
 import { GalleyStore } from './store.ts'
 
 interface WorkspaceSingletonState {
-  lastGalleyCwd: string | null
   storesByRoot: Map<string, GalleyStore>
 }
 
@@ -20,7 +19,6 @@ const WORKSPACE_SYM = Symbol.for('dsh-galley.workspace.v1')
 const g = globalThis as unknown as Record<symbol, WorkspaceSingletonState | undefined>
 if (!g[WORKSPACE_SYM]) {
   g[WORKSPACE_SYM] = {
-    lastGalleyCwd: null,
     storesByRoot: new Map<string, GalleyStore>(),
   }
 }
@@ -66,25 +64,29 @@ export function clearSessionActivePacket(packetId: string, root?: string): void 
   }
 }
 
-export function noteGalleyCwd(cwd: string | null | undefined): void {
-  const trimmed = cwd?.trim()
-  if (trimmed) wsState.lastGalleyCwd = trimmed
+/**
+ * Deprecated no-op retained for public export compatibility.
+ * Process-global "last used cwd" was removed in 0.2.3 so concurrent sessions
+ * never leak cwd across workspaces.
+ */
+export function noteGalleyCwd(_cwd: string | null | undefined): void {
+  // Intentionally pure no-op (0.2.3 cross-session cwd confinement).
 }
 
 export function getGalleyCwd(): string {
-  return wsState.lastGalleyCwd ?? process.cwd()
+  return process.cwd()
 }
 
 export function resolveGalleyCwd(explicitCwd?: string | null, sessionCwd?: string | null): string {
-  const fromExplicit = explicitCwd?.trim()
-  if (fromExplicit) {
-    noteGalleyCwd(fromExplicit)
-    return fromExplicit
-  }
+  // When bound to an agent session (`session.header.cwd`), confine strictly to
+  // that session workspace and ignore arbitrary out-of-workspace `args.cwd`.
   const fromSession = sessionCwd?.trim()
   if (fromSession) {
-    noteGalleyCwd(fromSession)
     return fromSession
+  }
+  const fromExplicit = explicitCwd?.trim()
+  if (fromExplicit) {
+    return fromExplicit
   }
   return getGalleyCwd()
 }
@@ -103,6 +105,5 @@ export function getStoreForCwd(cwd?: string | null): { store: GalleyStore; root:
 }
 
 export function _resetGalleyWorkspaceForTests(): void {
-  wsState.lastGalleyCwd = null
   storesByRoot.clear()
 }

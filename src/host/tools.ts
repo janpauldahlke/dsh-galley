@@ -134,12 +134,14 @@ export const Err = {
   ANNOTATION_NOT_FOUND: 'GALLEY_ANNOTATION_NOT_FOUND',
   TYPST_COMPILE_ERROR: 'GALLEY_TYPST_COMPILE_ERROR',
   EXPORT_FAILED: 'GALLEY_EXPORT_FAILED',
+  EXPORT_BLOCKED_BY_PREFLIGHT: 'GALLEY_EXPORT_BLOCKED_BY_PREFLIGHT',
   INVALID_PARAMS: 'GALLEY_INVALID_PARAMS',
 } as const
 
 /**
  * A typed tool failure. `baseHash`/`currentHash` are attached to
- * GALLEY_PROPOSAL_CONFLICT (spec 02 §3); `diagnostics` to GALLEY_TYPST_COMPILE_ERROR.
+ * GALLEY_PROPOSAL_CONFLICT (spec 02 §3); `diagnostics` to GALLEY_TYPST_COMPILE_ERROR;
+ * `preflightWarnings` to GALLEY_EXPORT_BLOCKED_BY_PREFLIGHT.
  */
 export type ToolFailure = {
   ok: false
@@ -148,6 +150,7 @@ export type ToolFailure = {
   baseHash?: string
   currentHash?: string
   diagnostics?: string
+  preflightWarnings?: GalleyPreflightWarning[]
 }
 export type Ok<T> = { ok: true } & T
 
@@ -506,6 +509,99 @@ export function normalizeHeaderFields(rawFields: unknown): Record<string, unknow
   return out
 }
 
+/** Extract plain-text fallback title for `header` blocks when `fields.title` was omitted in favor of `title` or `body`. */
+function extractHeaderTitleFallback(raw: Record<string, unknown>): string {
+  if (typeof raw.titel === 'string' && raw.titel.trim()) return raw.titel.trim()
+  if (typeof raw.title === 'string' && raw.title.trim()) return raw.title.trim()
+  if (raw.body !== undefined && raw.body !== null) {
+    const flat = inlineText(toInline(raw.body)).replace(/\s+/g, ' ').trim()
+    if (flat) return flat
+  }
+  return ''
+}
+
+const HEADER_SHORTHAND_PATCH_KEYS = new Set([
+  'titel',
+  'title',
+  'subtitle',
+  'untertitel',
+  'fach',
+  'subject',
+  'klasse',
+  'group',
+  'meta',
+  'datum',
+  'date',
+  'name',
+  'body',
+])
+
+/**
+ * Normalize a `patch` payload targeting a `header` block:
+ * - Accepts `patch.fields` OR top-level shorthands (`patch.title`, `patch.body`, `patch.subtitle`, …).
+ * - Preserves existing `fields` keys when only shorthands are supplied, and falls back to
+ *   `patch.title` / flattened `patch.body` if `fields.titel` would otherwise be blank.
+ */
+function resolveHeaderPatchFields(
+  existingFields: Record<string, unknown> | undefined,
+  patchInput: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const prev = existingFields ?? { titel: '' }
+  if ('fields' in patchInput && patchInput.fields && typeof patchInput.fields === 'object' && !Array.isArray(patchInput.fields)) {
+    const rf = patchInput.fields as Record<string, unknown>
+    const norm = normalizeHeaderFields(rf)
+    if (!String(norm.titel ?? '').trim()) {
+      const fb = extractHeaderTitleFallback(patchInput)
+      const explicitEmptyTitle = 'titel' in rf || 'title' in rf
+      if (fb) {
+        norm.titel = fb
+      } else if (!explicitEmptyTitle && typeof prev.titel === 'string' && prev.titel.trim()) {
+        norm.titel = prev.titel
+      }
+    }
+    return norm
+  }
+  const hasShorthand = Object.keys(patchInput).some((k) => HEADER_SHORTHAND_PATCH_KEYS.has(k))
+  if (!hasShorthand) return null
+  const mergedRaw: Record<string, unknown> = { ...prev }
+  if ('title' in patchInput || 'titel' in patchInput) {
+    delete mergedRaw.titel
+    delete mergedRaw.title
+  }
+  if ('subtitle' in patchInput || 'untertitel' in patchInput) {
+    delete mergedRaw.subtitle
+    delete mergedRaw.untertitel
+  }
+  if ('subject' in patchInput || 'fach' in patchInput) {
+    delete mergedRaw.fach
+    delete mergedRaw.subject
+  }
+  if ('group' in patchInput || 'meta' in patchInput || 'klasse' in patchInput) {
+    delete mergedRaw.klasse
+    delete mergedRaw.group
+    delete mergedRaw.meta
+  }
+  if ('date' in patchInput || 'datum' in patchInput) {
+    delete mergedRaw.datum
+    delete mergedRaw.date
+  }
+  for (const [k, v] of Object.entries(patchInput)) {
+    if (k !== 'body' && HEADER_SHORTHAND_PATCH_KEYS.has(k)) {
+      mergedRaw[k] = v
+    }
+  }
+  if ('body' in patchInput && !('title' in patchInput) && !('titel' in patchInput)) {
+    const bodyTitle = extractHeaderTitleFallback({ body: patchInput.body })
+    if (bodyTitle) mergedRaw.titel = bodyTitle
+  }
+  const norm = normalizeHeaderFields(mergedRaw)
+  if (!String(norm.titel ?? '').trim()) {
+    const fb = extractHeaderTitleFallback(patchInput)
+    if (fb) norm.titel = fb
+  }
+  return norm
+}
+
 /** Build a fully-formed Block from raw input (assigns id, defaults, hash). */
 export function buildBlock(
   packet: GalleyPacket,
@@ -556,9 +652,15 @@ export function buildBlock(
     stale: null,
   }
   switch (type) {
-    case 'header':
-      base.fields = normalizeHeaderFields(raw.fields)
+    case 'header': {
+      const normFields = normalizeHeaderFields(raw.fields)
+      if (!String(normFields.titel ?? '').trim()) {
+        const fb = extractHeaderTitleFallback(raw)
+        if (fb) normFields.titel = fb
+      }
+      base.fields = normFields
       break
+    }
     case 'heading':
       base.level = (raw.level as 1 | 2 | 3) ?? 1
       base.numbered = raw.numbered ?? false
@@ -938,6 +1040,23 @@ function summary(b: Block): string {
 
 // ── Tool 4: galley_edit_block ───────────────────────────────────────────────
 
+export const MAX_BATCH_OPS = 25
+
+export interface BatchBlockOp {
+  op: 'insert' | 'patch' | 'move' | 'remove'
+  sheetId?: SheetId
+  beforeId?: BlockId
+  afterId?: BlockId
+  afterBlockId?: BlockId
+  block?: Record<string, unknown>
+  blockId?: BlockId
+  baseHash?: string
+  patch?: Record<string, unknown>
+  toSheetId?: SheetId
+  toBeforeId?: BlockId
+  toAfterId?: BlockId
+}
+
 export interface EditBlockArgs {
   packetId?: string
   /**
@@ -945,11 +1064,14 @@ export interface EditBlockArgs {
    * - `patch`/`move`/`remove`: auto-resolved from `blockId`'s owning sheet when omitted.
    * - `insert`: auto-resolved from `beforeId`/`afterId` anchor or `s1` on single-sheet packets;
    *   REQUIRED on multi-sheet packets when no `beforeId`/`afterId` anchor is supplied.
+   * - `batch`: optional default `sheetId` inherited by sub-ops that omit `sheetId`.
    * - `sheet-update`/`sheet-remove`: target sheet (defaults to `s1` on single-sheet `sheet-update`).
    */
   sheetId?: SheetId
-  op: 'insert' | 'patch' | 'move' | 'remove' | 'sheet-add' | 'sheet-update' | 'sheet-remove'
+  op: 'insert' | 'patch' | 'move' | 'remove' | 'batch' | 'sheet-add' | 'sheet-update' | 'sheet-remove'
   origin: 'human' | 'agent'
+  // batch:
+  ops?: BatchBlockOp[]
   // insert:
   beforeId?: BlockId
   afterId?: BlockId
@@ -971,17 +1093,474 @@ export interface EditBlockArgs {
   paper?: 'a4' | 'letter'
 }
 
+export interface ProposalSummary {
+  id: string
+  op: string
+  targetBlockId: BlockId
+  status: 'pending'
+}
+
+type PlannedBlockStep =
+  | { kind: 'fail'; failure: ToolFailure }
+  | {
+      kind: 'propose'
+      proposal: GalleyProposal
+      sheetId: SheetId
+    }
+  | {
+      kind: 'direct'
+      sheetId: SheetId
+      changedId: BlockId
+      note: string
+      applyTo: (p: GalleyPacket) => BlockId
+    }
+
+function planAndSimulateBlockOp(
+  working: GalleyPacket,
+  sub: BatchBlockOp,
+  ctx: {
+    origin: 'human' | 'agent'
+    inReviewMode: boolean
+    createdAtRev: number
+    propSeq: number
+    now: string
+  },
+): PlannedBlockStep {
+  if (!['insert', 'patch', 'move', 'remove'].includes(String(sub.op))) {
+    return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, `unsupported block op '${String(sub.op)}'`) }
+  }
+  if (sub.sheetId !== undefined && !working.sheets[sub.sheetId]) {
+    return { kind: 'fail', failure: fail(Err.SHEET_NOT_FOUND, `sheet ${sub.sheetId} not found`) }
+  }
+
+  const insertAfterId = sub.op === 'insert' ? (sub.afterId ?? sub.afterBlockId) : undefined
+  const insertAnchorId = sub.op === 'insert' ? (sub.beforeId ?? insertAfterId) : undefined
+  const locatedAnchor = insertAnchorId ? findBlock(working, insertAnchorId) : null
+  if (insertAnchorId && !locatedAnchor) {
+    return { kind: 'fail', failure: fail(Err.BLOCK_NOT_FOUND, `anchor block ${insertAnchorId} not found`) }
+  }
+  if (locatedAnchor && sub.sheetId !== undefined && sub.sheetId !== locatedAnchor.sheet.id) {
+    return {
+      kind: 'fail',
+      failure: fail(
+        Err.INVALID_PARAMS,
+        `anchor block ${insertAnchorId} belongs to sheet ${locatedAnchor.sheet.id}, not ${sub.sheetId}`,
+      ),
+    }
+  }
+
+  let resolvedSheetId: SheetId
+  if (sub.op === 'insert') {
+    if (sub.sheetId !== undefined) {
+      resolvedSheetId = sub.sheetId
+    } else if (locatedAnchor) {
+      resolvedSheetId = locatedAnchor.sheet.id
+    } else if (working.sheetOrder.length === 1) {
+      resolvedSheetId = working.sheetOrder[0]
+    } else {
+      return {
+        kind: 'fail',
+        failure: fail(
+          Err.INVALID_PARAMS,
+          `multi-sheet packet (${working.sheetOrder.join(', ')}): pass sheetId (or beforeId/afterId) on insert`,
+        ),
+      }
+    }
+  } else {
+    const locatedPre = sub.blockId ? findBlock(working, sub.blockId) : null
+    resolvedSheetId = sub.sheetId ?? (locatedPre ? locatedPre.sheet.id : working.sheetOrder[0])
+  }
+
+  const locatedPre = sub.blockId ? findBlock(working, sub.blockId) : null
+  const sheet = working.sheets[resolvedSheetId]
+  if (!sheet) {
+    return { kind: 'fail', failure: fail(Err.SHEET_NOT_FOUND, `sheet ${resolvedSheetId} not found`) }
+  }
+
+  let effectiveBeforeId = sub.beforeId
+  if (!effectiveBeforeId && insertAfterId) {
+    const idx = sheet.blocks.findIndex((b) => b.id === insertAfterId)
+    if (idx >= 0 && idx + 1 < sheet.blocks.length) {
+      effectiveBeforeId = sheet.blocks[idx + 1].id
+    }
+  }
+
+  // Finding 3: in `auto` mode, agent `patch`, `remove`, AND `move` on human-authored blocks stage proposals.
+  const targetOrigin =
+    sub.op === 'patch' || sub.op === 'remove' || sub.op === 'move' ? locatedPre?.block?.origin : undefined
+  const shouldPropose = ctx.origin === 'agent' && (ctx.inReviewMode || targetOrigin === 'human')
+
+  if (shouldPropose) {
+    if (sub.op === 'insert') {
+      if (!sub.block) return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, 'insert requires a block') }
+      const { block: built, error } = buildBlock(working, sub.block, 'human')
+      if (error) return { kind: 'fail', failure: fail(toStoreCode(error), `invalid block: ${error}`) }
+      if (built.type === 'header' && !(built.fields?.titel ?? '').trim()) {
+        return {
+          kind: 'fail',
+          failure: fail(Err.INVALID_PARAMS, 'header block requires fields.title (or title)'),
+        }
+      }
+      working.nextBlockSeq += 1
+      return {
+        kind: 'propose',
+        sheetId: resolvedSheetId,
+        proposal: {
+          id: `prop-${ctx.propSeq}`,
+          op: 'insert',
+          sheetId: resolvedSheetId,
+          targetBlockId: built.id,
+          baseHash: '',
+          proposedPatch: { block: built, beforeId: effectiveBeforeId },
+          status: 'pending',
+          createdAtRev: ctx.createdAtRev,
+        },
+      }
+    }
+
+    if (!sub.blockId) {
+      return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, `${sub.op} requires blockId`) }
+    }
+    const target = locatedPre ?? findBlock(working, sub.blockId)
+    if (!target) {
+      return { kind: 'fail', failure: fail(Err.BLOCK_NOT_FOUND, `block ${sub.blockId} not found`) }
+    }
+    if (sub.baseHash && sub.baseHash !== target.block.hash) {
+      const t = fail(Err.PROPOSAL_CONFLICT, `block ${sub.blockId} changed (base hash mismatch)`)
+      t.baseHash = sub.baseHash
+      t.currentHash = target.block.hash
+      return { kind: 'fail', failure: t }
+    }
+
+    if (sub.op === 'patch') {
+      const rawPatch = { ...(sub.patch ?? {}) }
+      const proposedPatch: Record<string, unknown> = {}
+      if (target.block.type === 'header') {
+        const hdrFields = resolveHeaderPatchFields(
+          target.block.fields as unknown as Record<string, unknown>,
+          rawPatch,
+        )
+        if (hdrFields) proposedPatch.fields = hdrFields
+        for (const [k, v] of Object.entries(rawPatch)) {
+          if (k !== 'fields' && !HEADER_SHORTHAND_PATCH_KEYS.has(k)) {
+            proposedPatch[k] = v
+          }
+        }
+      } else {
+        Object.assign(proposedPatch, rawPatch)
+      }
+      if ('provenance' in proposedPatch) {
+        const pRes = validateProvenance(proposedPatch.provenance)
+        if (pRes.error) return { kind: 'fail', failure: fail(toStoreCode(pRes.error), 'invalid provenance') }
+        proposedPatch.provenance = pRes.provenance
+      }
+      const beforePatch: Record<string, unknown> = {}
+      const rawBlock = target.block as unknown as Record<string, unknown>
+      for (const k of Object.keys(proposedPatch)) {
+        if (k in rawBlock) beforePatch[k] = JSON.parse(JSON.stringify(rawBlock[k]))
+      }
+      return {
+        kind: 'propose',
+        sheetId: target.sheet.id,
+        proposal: {
+          id: `prop-${ctx.propSeq}`,
+          op: 'patch',
+          sheetId: target.sheet.id,
+          targetBlockId: target.block.id,
+          baseHash: target.block.hash,
+          beforePatch,
+          proposedPatch,
+          status: 'pending',
+          createdAtRev: ctx.createdAtRev,
+        },
+      }
+    }
+
+    if (sub.op === 'move') {
+      const targetSheetId = sub.toSheetId ?? resolvedSheetId
+      if (!working.sheets[targetSheetId]) {
+        return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, 'target sheet not found') }
+      }
+      return {
+        kind: 'propose',
+        sheetId: target.sheet.id,
+        proposal: {
+          id: `prop-${ctx.propSeq}`,
+          op: 'move',
+          sheetId: target.sheet.id,
+          targetBlockId: target.block.id,
+          baseHash: target.block.hash,
+          beforePatch: { sheetId: target.sheet.id },
+          proposedPatch: {
+            toSheetId: targetSheetId,
+            toBeforeId: sub.toBeforeId,
+            toAfterId: sub.toAfterId,
+          },
+          status: 'pending',
+          createdAtRev: ctx.createdAtRev,
+        },
+      }
+    }
+
+    // remove proposal
+    return {
+      kind: 'propose',
+      sheetId: target.sheet.id,
+      proposal: {
+        id: `prop-${ctx.propSeq}`,
+        op: 'remove',
+        sheetId: target.sheet.id,
+        targetBlockId: target.block.id,
+        baseHash: target.block.hash,
+        beforePatch: { type: target.block.type, preview: blockText(target.block).slice(0, 80) },
+        proposedPatch: { remove: true },
+        status: 'pending',
+        createdAtRev: ctx.createdAtRev,
+      },
+    }
+  }
+
+  // Direct mutation path: validate, simulate on `working`, and emit deterministic replay closure for `store.commit`.
+  if (sub.op === 'insert') {
+    if (!sub.block) return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, 'insert requires a block') }
+    const { block, error } = buildBlock(working, sub.block, ctx.origin)
+    if (error) return { kind: 'fail', failure: fail(toStoreCode(error), `invalid block: ${error}`) }
+    if (block.type === 'header' && !(block.fields?.titel ?? '').trim()) {
+      return {
+        kind: 'fail',
+        failure: fail(Err.INVALID_PARAMS, 'header block requires fields.title (or title)'),
+      }
+    }
+    const simIdx = effectiveBeforeId ? sheet.blocks.findIndex((b) => b.id === effectiveBeforeId) : sheet.blocks.length
+    sheet.blocks.splice(simIdx < 0 ? sheet.blocks.length : simIdx, 0, JSON.parse(JSON.stringify(block)) as Block)
+    working.nextBlockSeq += 1
+    const seqAfterInsert = working.nextBlockSeq
+    const beforeAnchor = effectiveBeforeId
+    const targetSid = resolvedSheetId
+    const note = `insert ${block.id} (${block.type}) on ${targetSid} (${ctx.origin})`
+    return {
+      kind: 'direct',
+      sheetId: targetSid,
+      changedId: block.id,
+      note,
+      applyTo: (p: GalleyPacket) => {
+        const sh = p.sheets[targetSid]
+        const copy = JSON.parse(JSON.stringify(block)) as Block
+        if (Array.isArray(copy.dependsOn) && copy.dependsOn.length > 0) {
+          copy.dependsOn = copy.dependsOn.map((d) => {
+            const orig = findBlock(p, d.id)
+            return orig ? { ...d, sinceHash: orig.block.hash } : d
+          })
+        }
+        copy.hash = hashBlock(copy)
+        const idx = beforeAnchor ? sh.blocks.findIndex((b) => b.id === beforeAnchor) : sh.blocks.length
+        sh.blocks.splice(idx < 0 ? sh.blocks.length : idx, 0, copy)
+        p.nextBlockSeq = Math.max(p.nextBlockSeq + 1, seqAfterInsert)
+        return copy.id
+      },
+    }
+  }
+
+  if (!sub.blockId) {
+    return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, `${sub.op} requires blockId`) }
+  }
+  const target = findBlock(working, sub.blockId)
+  if (!target) {
+    return { kind: 'fail', failure: fail(Err.BLOCK_NOT_FOUND, `block ${sub.blockId} not found`) }
+  }
+  if (sub.baseHash !== undefined && sub.baseHash !== target.block.hash) {
+    const t = fail(Err.PROPOSAL_CONFLICT, `block ${sub.blockId} changed (base hash mismatch)`)
+    t.baseHash = sub.baseHash
+    t.currentHash = target.block.hash
+    return { kind: 'fail', failure: t }
+  }
+
+  if (sub.op === 'patch') {
+    const patchInput = sub.patch ?? {}
+    const applyPatchOnPacket = (p: GalleyPacket): BlockId => {
+      const found = findBlock(p, sub.blockId!)
+      if (!found) throw new StoreError('not_found', `block ${sub.blockId} not found`)
+      const b = found.block as unknown as Record<string, unknown>
+      let contentTouched = false
+      const isHeader = found.block.type === 'header'
+
+      if (found.block.type === 'header') {
+        const hdrFields = resolveHeaderPatchFields(
+          found.block.fields as unknown as Record<string, unknown>,
+          patchInput,
+        )
+        if (hdrFields) {
+          b.fields = hdrFields
+          contentTouched = true
+        }
+      }
+
+      for (const [k, v] of Object.entries(patchInput)) {
+        if (isHeader && (k === 'fields' || HEADER_SHORTHAND_PATCH_KEYS.has(k))) {
+          continue
+        }
+        if (k === 'body') {
+          const inlines = toInline(v)
+          if (inlines.length > 0) {
+            const e = validateInline(inlines)
+            if (e) throw new StoreError(e, 'inline limit')
+          }
+          b.body = inlines
+          contentTouched = true
+        } else if (k === 'slot') {
+          const slotVal = v as LayoutSlot
+          const e = validateSlot(slotVal)
+          if (e) throw new StoreError(e, 'slot')
+          if ((found.block.type === 'header' || found.block.type === 'heading') && slotVal.mode !== 'full') {
+            throw new StoreError('invalid_block', 'header/heading must use full slot')
+          }
+          if (slotVal.asset && !(p.assets && slotVal.asset.id in p.assets)) {
+            throw new StoreError('asset_not_found', `asset ${slotVal.asset.id} not found`)
+          }
+          b.slot = slotVal
+        } else if (k === 'dependsOn') {
+          const norm = normalizeDependsOn(p, v, ctx.now)
+          if (norm.error) throw new StoreError(norm.error, 'dependsOn must be a valid array')
+          b.dependsOn = norm.deps
+        } else if (k === 'headers') {
+          const hRes = normalizeTableHeaders(v)
+          if (hRes.error) throw new StoreError(hRes.error, 'invalid table headers')
+          b.headers = hRes.headers
+          contentTouched = true
+        } else if (k === 'rows') {
+          const rRes = normalizeTableRows(v)
+          if (rRes.error) throw new StoreError(rRes.error, 'invalid table rows')
+          b.rows = rRes.rows
+          contentTouched = true
+        } else if (k === 'colWidths') {
+          const wRes = normalizeTableColWidths(v)
+          if (wRes.error) throw new StoreError(wRes.error, 'invalid table colWidths')
+          if (wRes.colWidths) b.colWidths = wRes.colWidths
+          else delete b.colWidths
+          contentTouched = true
+        } else if (k === 'fields') {
+          b.fields = normalizeHeaderFields(v)
+          contentTouched = true
+        } else if (k === 'provenance') {
+          const provRes = validateProvenance(v)
+          if (provRes.error) throw new StoreError(provRes.error, 'invalid provenance')
+          if (provRes.provenance === null) delete b.provenance
+          else if (provRes.provenance !== undefined) b.provenance = provRes.provenance
+          contentTouched = true
+        } else if (['level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
+          b[k] = v
+          contentTouched = true
+        }
+      }
+
+      if (contentTouched && !('dependsOn' in patchInput) && Array.isArray(b.dependsOn) && b.dependsOn.length > 0) {
+        b.dependsOn = (b.dependsOn as Block['dependsOn']).map((d) => {
+          const originBlk = findBlock(p, d.id)
+          return originBlk ? { id: d.id, sinceHash: originBlk.block.hash, at: ctx.now } : d
+        })
+      }
+      if (ctx.origin === 'human') b.origin = 'human'
+      if (b.body) {
+        const e = validateInline(b.body as Inline[])
+        if (e) throw new StoreError(e, 'inline limit')
+      }
+      found.block.hash = hashBlock(found.block)
+      return found.block.id
+    }
+
+    try {
+      applyPatchOnPacket(working)
+    } catch (e) {
+      return { kind: 'fail', failure: mapError(e) }
+    }
+    const patchedKeys = Object.keys(patchInput).join(',') || 'noop'
+    const touchedSid = target.sheet.id
+    return {
+      kind: 'direct',
+      sheetId: touchedSid,
+      changedId: target.block.id,
+      note: `patch ${target.block.id} (${target.block.type}:${patchedKeys}) on ${touchedSid} (${ctx.origin})`,
+      applyTo: applyPatchOnPacket,
+    }
+  }
+
+  if (sub.op === 'move') {
+    const targetSheetId = sub.toSheetId ?? resolvedSheetId
+    if (!working.sheets[targetSheetId]) {
+      return { kind: 'fail', failure: fail(Err.INVALID_PARAMS, 'target sheet not found') }
+    }
+    const fromSid = target.sheet.id
+    const applyMoveOnPacket = (p: GalleyPacket): BlockId => {
+      const from = findBlock(p, sub.blockId!)
+      if (!from) throw new StoreError('not_found', `block ${sub.blockId} not found`)
+      const dest = p.sheets[targetSheetId]
+      if (!dest) throw new StoreError('invalid_op', 'target sheet not found')
+      from.sheet.blocks.splice(from.index, 1)
+      let to = dest.blocks.length
+      if (sub.toBeforeId) to = dest.blocks.findIndex((b) => b.id === sub.toBeforeId)
+      if (sub.toAfterId) {
+        const i = dest.blocks.findIndex((b) => b.id === sub.toAfterId)
+        to = i >= 0 ? i + 1 : dest.blocks.length
+      }
+      dest.blocks.splice(to < 0 ? dest.blocks.length : to, 0, from.block)
+      return from.block.id
+    }
+    try {
+      applyMoveOnPacket(working)
+    } catch (e) {
+      return { kind: 'fail', failure: mapError(e) }
+    }
+    return {
+      kind: 'direct',
+      sheetId: targetSheetId,
+      changedId: sub.blockId,
+      note:
+        fromSid === targetSheetId
+          ? `move ${sub.blockId} within ${targetSheetId} (${ctx.origin})`
+          : `move ${sub.blockId} ${fromSid}→${targetSheetId} (${ctx.origin})`,
+      applyTo: applyMoveOnPacket,
+    }
+  }
+
+  // remove
+  const applyRemoveOnPacket = (p: GalleyPacket): BlockId => {
+    const found = findBlock(p, sub.blockId!)
+    if (!found) throw new StoreError('not_found', `block ${sub.blockId} not found`)
+    found.sheet.blocks.splice(found.index, 1)
+    return found.block.id
+  }
+  const removedType = target.block.type
+  const removedSid = target.sheet.id
+  try {
+    applyRemoveOnPacket(working)
+  } catch (e) {
+    return { kind: 'fail', failure: mapError(e) }
+  }
+  return {
+    kind: 'direct',
+    sheetId: removedSid,
+    changedId: sub.blockId,
+    note: `remove ${sub.blockId} (${removedType}) from ${removedSid} (${ctx.origin})`,
+    applyTo: applyRemoveOnPacket,
+  }
+}
+
 export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs): Promise<Ok<{
   applied: boolean
+  appliedCount?: number
+  proposedCount?: number
   packetId: string
   sheetId: SheetId
   sheetOrder?: SheetId[]
   rev: number
   /** The block that was written (compact outline), or null (proposal / sheet op path). */
   block: BlockOutline | null
-  /** The proposal recorded (when reviewMode==='review' or agent patch on human block), if any. */
-  proposal: { id: string; op: string; targetBlockId: BlockId; status: 'pending' } | null
+  blocks?: BlockOutline[]
+  /** The proposal recorded (when reviewMode==='review' or agent mutation on human block), if any. */
+  proposal: ProposalSummary | null
+  proposals?: ProposalSummary[]
   proof: SheetProofReceipt | null
+  proofs?: Record<SheetId, SheetProofReceipt | null>
   /** Block ids now stale (StaleInfo != null) after this change. */
   staleDependents: BlockId[]
 }> | ToolFailure> {
@@ -1083,156 +1662,177 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
     }
   }
 
-  if (args.sheetId !== undefined && !packet.sheets[args.sheetId]) {
-    return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
-  }
-
-  const insertAfterId = args.op === 'insert' ? (args.afterId ?? args.afterBlockId) : undefined
-  const insertAnchorId = args.op === 'insert' ? (args.beforeId ?? insertAfterId) : undefined
-  const locatedAnchor = insertAnchorId ? findBlock(packet, insertAnchorId) : null
-  if (insertAnchorId && !locatedAnchor) {
-    return fail(Err.BLOCK_NOT_FOUND, `anchor block ${insertAnchorId} not found`)
-  }
-  if (locatedAnchor && args.sheetId !== undefined && args.sheetId !== locatedAnchor.sheet.id) {
-    return fail(
-      Err.INVALID_PARAMS,
-      `anchor block ${insertAnchorId} belongs to sheet ${locatedAnchor.sheet.id}, not ${args.sheetId}`,
-    )
-  }
-
-  let resolvedSheetId: SheetId
-  if (args.op === 'insert') {
-    if (args.sheetId !== undefined) {
-      resolvedSheetId = args.sheetId
-    } else if (locatedAnchor) {
-      resolvedSheetId = locatedAnchor.sheet.id
-    } else if (packet.sheetOrder.length === 1) {
-      resolvedSheetId = packet.sheetOrder[0]
-    } else {
-      return fail(
-        Err.INVALID_PARAMS,
-        `multi-sheet packet (${packet.sheetOrder.join(', ')}): pass sheetId (or beforeId/afterId) on insert`,
-      )
+  // Finding 5: `op: 'batch'` — 1..25 block operations in a single atomic commit + single proof pass.
+  if (args.op === 'batch') {
+    if (!Array.isArray(args.ops) || args.ops.length === 0 || args.ops.length > MAX_BATCH_OPS) {
+      return fail(Err.INVALID_PARAMS, `batch requires ops array of 1..${MAX_BATCH_OPS} block operations`)
     }
-  } else {
-    const locatedPre = args.blockId ? findBlock(packet, args.blockId) : null
-    resolvedSheetId = args.sheetId ?? (locatedPre ? locatedPre.sheet.id : packet.sheetOrder[0])
-  }
+    if (args.sheetId !== undefined && !packet.sheets[args.sheetId]) {
+      return fail(Err.SHEET_NOT_FOUND, `sheet ${args.sheetId} not found`)
+    }
+    try {
+      const working = JSON.parse(JSON.stringify(packet)) as GalleyPacket
+      const now = deps.now ? deps.now() : new Date().toISOString()
+      let propSeq = store.listProposals(pid).length + 1
+      const directSteps: Extract<PlannedBlockStep, { kind: 'direct' }>[] = []
+      const stagedProposals: GalleyProposal[] = []
+      const touchedSheetSet = new Set<SheetId>()
+      let lastSheetId: SheetId = args.sheetId ?? packet.sheetOrder[0]
 
-  const locatedPre = args.blockId ? findBlock(packet, args.blockId) : null
-  const sheet = packet.sheets[resolvedSheetId]
-  if (!sheet) return fail(Err.SHEET_NOT_FOUND, `sheet ${resolvedSheetId} not found`)
+      for (let i = 0; i < args.ops.length; i++) {
+        const rawSub = args.ops[i]
+        if (!rawSub || typeof rawSub !== 'object' || Array.isArray(rawSub)) {
+          return fail(Err.INVALID_PARAMS, `batch ops[${i}] must be an object`)
+        }
+        const sub: BatchBlockOp = {
+          ...rawSub,
+          ...(rawSub.sheetId === undefined && args.sheetId !== undefined ? { sheetId: args.sheetId } : {}),
+        }
+        const planned = planAndSimulateBlockOp(working, sub, {
+          origin: args.origin,
+          inReviewMode,
+          createdAtRev: packet.rev,
+          propSeq,
+          now,
+        })
+        if (planned.kind === 'fail') {
+          return planned.failure
+        }
+        touchedSheetSet.add(planned.sheetId)
+        lastSheetId = planned.sheetId
+        if (planned.kind === 'propose') {
+          stagedProposals.push(planned.proposal)
+          propSeq += 1
+        } else {
+          directSteps.push(planned)
+        }
+      }
 
-  // Convert `afterId` on insert into the concrete `beforeId` (or undefined = append at end)
-  let effectiveBeforeId = args.beforeId
-  if (!effectiveBeforeId && insertAfterId) {
-    const idx = sheet.blocks.findIndex((b) => b.id === insertAfterId)
-    if (idx >= 0 && idx + 1 < sheet.blocks.length) {
-      effectiveBeforeId = sheet.blocks[idx + 1].id
+      if (directSteps.length > 0) {
+        const summaryNote =
+          directSteps.length <= 2
+            ? directSteps.map((s) => s.note).join('; ')
+            : `batch (${directSteps.length} ops on ${[...touchedSheetSet].join(',')}) (${args.origin})`
+        store.commit(
+          pid,
+          null,
+          (p) => {
+            let lastId: BlockId | null = null
+            for (const step of directSteps) {
+              lastId = step.applyTo(p)
+            }
+            return lastId
+          },
+          { actor: args.origin, note: summaryNote },
+        )
+        for (const prop of stagedProposals) {
+          store.addProposal(pid, prop, { bumpRev: false })
+        }
+      } else if (stagedProposals.length > 0) {
+        for (let i = 0; i < stagedProposals.length; i++) {
+          store.addProposal(pid, stagedProposals[i], { bumpRev: i === stagedProposals.length - 1 })
+        }
+      }
+
+      const loaded = store.load(pid)!
+      const proofsBySheet: Record<SheetId, SheetProofReceipt | null> = {}
+      if (deps.render) {
+        const assetBytes = assetBytesForPacket(deps, loaded)
+        for (const sid of loaded.sheetOrder) {
+          if (!touchedSheetSet.has(sid)) continue
+          const sh = loaded.sheets[sid]
+          if (!sh) continue
+          try {
+            proofsBySheet[sid] = toReceipt(await deps.render(sh, loaded, assetBytes), loaded, sh)
+          } catch {
+            proofsBySheet[sid] = null
+          }
+        }
+      } else {
+        for (const sid of touchedSheetSet) proofsBySheet[sid] = null
+      }
+
+      const directOutlines: BlockOutline[] = []
+      const seenIds = new Set<BlockId>()
+      for (const step of directSteps) {
+        if (seenIds.has(step.changedId)) continue
+        const found = findBlock(loaded, step.changedId)
+        if (found) {
+          directOutlines.push(blockOutline(found.block))
+          seenIds.add(step.changedId)
+        }
+      }
+      const proposalSummaries: ProposalSummary[] = stagedProposals.map((p) => ({
+        id: p.id,
+        op: p.op ?? 'patch',
+        targetBlockId: p.targetBlockId,
+        status: 'pending',
+      }))
+
+      return {
+        ok: true,
+        applied: stagedProposals.length === 0,
+        appliedCount: directSteps.length,
+        proposedCount: stagedProposals.length,
+        packetId: pid,
+        sheetId: lastSheetId,
+        rev: loaded.rev,
+        block: directOutlines.length > 0 ? directOutlines[directOutlines.length - 1] : null,
+        blocks: directOutlines,
+        proposal: proposalSummaries[0] ?? null,
+        proposals: proposalSummaries,
+        proof: proofsBySheet[lastSheetId] ?? null,
+        proofs: proofsBySheet,
+        staleDependents: staleBlockIds(loaded),
+      }
+    } catch (e) {
+      return mapError(e)
     }
   }
 
   try {
-    const prePatchOrigin = args.op === 'patch' ? locatedPre?.block?.origin : undefined
-    const shouldPropose =
-      args.origin === 'agent' && (inReviewMode || (args.op === 'patch' && prePatchOrigin === 'human'))
+    const working = JSON.parse(JSON.stringify(packet)) as GalleyPacket
+    const now = deps.now ? deps.now() : new Date().toISOString()
+    const propSeq = store.listProposals(pid).length + 1
+    const planned = planAndSimulateBlockOp(
+      working,
+      {
+        op: args.op,
+        sheetId: args.sheetId,
+        beforeId: args.beforeId,
+        afterId: args.afterId,
+        afterBlockId: args.afterBlockId,
+        block: args.block,
+        blockId: args.blockId,
+        baseHash: args.baseHash,
+        patch: args.patch,
+        toSheetId: args.toSheetId,
+        toBeforeId: args.toBeforeId,
+        toAfterId: args.toAfterId,
+      },
+      {
+        origin: args.origin,
+        inReviewMode,
+        createdAtRev: packet.rev,
+        propSeq,
+        now,
+      },
+    )
+    if (planned.kind === 'fail') {
+      return planned.failure
+    }
 
-    if (shouldPropose) {
-      const seq = store.listProposals(pid).length + 1
-      let prop: GalleyProposal
-
-      if (args.op === 'insert') {
-        if (!args.block) return fail(Err.INVALID_PARAMS, 'insert requires a block')
-        const { block: built, error } = buildBlock(packet, args.block, 'human')
-        if (error) return fail(toStoreCode(error), `invalid block: ${error}`)
-        prop = {
-          id: `prop-${seq}`,
-          op: 'insert',
-          sheetId: resolvedSheetId,
-          targetBlockId: built.id,
-          baseHash: '',
-          proposedPatch: { block: built, beforeId: effectiveBeforeId },
-          status: 'pending',
-          createdAtRev: packet.rev,
-        }
-      } else {
-        if (!args.blockId) return fail(Err.INVALID_PARAMS, `${args.op} requires blockId`)
-        const target = locatedPre ?? findBlock(packet, args.blockId)
-        if (!target) return fail(Err.BLOCK_NOT_FOUND, `block ${args.blockId} not found`)
-        if (args.baseHash && args.baseHash !== target.block.hash) {
-          const t = fail(Err.PROPOSAL_CONFLICT, `block ${args.blockId} changed (base hash mismatch)`)
-          t.baseHash = args.baseHash
-          t.currentHash = target.block.hash
-          return t
-        }
-
-        if (args.op === 'patch') {
-          const proposedPatch = { ...(args.patch ?? {}) }
-          if ('provenance' in proposedPatch) {
-            const pRes = validateProvenance(proposedPatch.provenance)
-            if (pRes.error) return fail(toStoreCode(pRes.error), 'invalid provenance')
-            proposedPatch.provenance = pRes.provenance
-          }
-          const beforePatch: Record<string, unknown> = {}
-          const rawBlock = target.block as unknown as Record<string, unknown>
-          for (const k of Object.keys(proposedPatch)) {
-            if (k in rawBlock) beforePatch[k] = JSON.parse(JSON.stringify(rawBlock[k]))
-          }
-          prop = {
-            id: `prop-${seq}`,
-            op: 'patch',
-            sheetId: target.sheet.id,
-            targetBlockId: target.block.id,
-            baseHash: target.block.hash,
-            beforePatch,
-            proposedPatch,
-            status: 'pending',
-            createdAtRev: packet.rev,
-          }
-        } else if (args.op === 'move') {
-          const targetSheetId = args.toSheetId ?? resolvedSheetId
-          if (!packet.sheets[targetSheetId]) return fail(Err.INVALID_PARAMS, 'target sheet not found')
-          prop = {
-            id: `prop-${seq}`,
-            op: 'move',
-            sheetId: target.sheet.id,
-            targetBlockId: target.block.id,
-            baseHash: target.block.hash,
-            beforePatch: { sheetId: target.sheet.id },
-            proposedPatch: {
-              toSheetId: targetSheetId,
-              toBeforeId: args.toBeforeId,
-              toAfterId: args.toAfterId,
-            },
-            status: 'pending',
-            createdAtRev: packet.rev,
-          }
-        } else {
-          // remove
-          prop = {
-            id: `prop-${seq}`,
-            op: 'remove',
-            sheetId: target.sheet.id,
-            targetBlockId: target.block.id,
-            baseHash: target.block.hash,
-            beforePatch: { type: target.block.type, preview: blockText(target.block).slice(0, 80) },
-            proposedPatch: { remove: true },
-            status: 'pending',
-            createdAtRev: packet.rev,
-          }
-        }
-      }
-
+    if (planned.kind === 'propose') {
+      const prop = planned.proposal
       store.addProposal(pid, prop)
       const loadedProp = store.load(pid)!
-      const renderProp = deps.render
-      const propSheetId = prop.sheetId ?? resolvedSheetId
-      const proofProp = renderProp
+      const propSheetId = prop.sheetId ?? planned.sheetId
+      const proofProp = deps.render
         ? await (async () => {
             try {
               const propSheet = loadedProp.sheets[propSheetId]
               return toReceipt(
-                await renderProp(propSheet, loadedProp, assetBytesForPacket(deps, loadedProp)),
+                await deps.render!(propSheet, loadedProp, assetBytesForPacket(deps, loadedProp)),
                 loadedProp,
                 propSheet,
               )
@@ -1255,155 +1855,21 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
     }
 
     const needsExpect = (args.op === 'patch' || args.op === 'remove' || args.op === 'move') && args.baseHash !== undefined
-    let changedId: BlockId | null = null
-    let touchedSheetId: SheetId = resolvedSheetId
-    let commitNote = ''
     store.commit(
       pid,
       needsExpect ? { blockId: args.blockId ?? '', baseHash: args.baseHash! } : null,
-      (p) => {
-        const sh = p.sheets[resolvedSheetId]
-        switch (args.op) {
-          case 'insert': {
-            if (!args.block) throw new StoreError('invalid_op', 'insert requires a block')
-            const { block, error } = buildBlock(p, args.block, args.origin)
-            if (error) throw new StoreError(error, 'invalid block')
-            const idx = effectiveBeforeId ? sh.blocks.findIndex((b) => b.id === effectiveBeforeId) : sh.blocks.length
-            sh.blocks.splice(idx < 0 ? sh.blocks.length : idx, 0, block)
-            p.nextBlockSeq += 1
-            changedId = block.id
-            commitNote = `insert ${block.id} (${block.type}) on ${resolvedSheetId} (${args.origin})`
-            return block.id
-          }
-          case 'patch': {
-            if (!args.blockId) throw new StoreError('invalid_op', 'patch requires blockId')
-            const found = findBlock(p, args.blockId)
-            if (!found) throw new StoreError('not_found', `block ${args.blockId} not found`)
-            touchedSheetId = found.sheet.id
-            const b = found.block as unknown as Record<string, unknown>
-            const now = deps.now ? deps.now() : new Date().toISOString()
-            const patchInput = args.patch ?? {}
-            let contentTouched = false
-            for (const [k, v] of Object.entries(patchInput)) {
-              if (k === 'body') {
-                const inlines = toInline(v)
-                if (inlines.length > 0) {
-                  const e = validateInline(inlines)
-                  if (e) throw new StoreError(e, 'inline limit')
-                }
-                b.body = inlines
-                contentTouched = true
-              } else if (k === 'slot') {
-                const slotVal = v as LayoutSlot
-                const e = validateSlot(slotVal)
-                if (e) throw new StoreError(e, 'slot')
-                if ((found.block.type === 'header' || found.block.type === 'heading') && slotVal.mode !== 'full') {
-                  throw new StoreError('invalid_block', 'header/heading must use full slot')
-                }
-                if (slotVal.asset && !(p.assets && slotVal.asset.id in p.assets)) {
-                  throw new StoreError('asset_not_found', `asset ${slotVal.asset.id} not found`)
-                }
-                b.slot = slotVal
-              } else if (k === 'dependsOn') {
-                const norm = normalizeDependsOn(p, v, now)
-                if (norm.error) throw new StoreError(norm.error, 'dependsOn must be a valid array')
-                b.dependsOn = norm.deps
-              } else if (k === 'headers') {
-                const hRes = normalizeTableHeaders(v)
-                if (hRes.error) throw new StoreError(hRes.error, 'invalid table headers')
-                b.headers = hRes.headers
-                contentTouched = true
-              } else if (k === 'rows') {
-                const rRes = normalizeTableRows(v)
-                if (rRes.error) throw new StoreError(rRes.error, 'invalid table rows')
-                b.rows = rRes.rows
-                contentTouched = true
-              } else if (k === 'colWidths') {
-                const wRes = normalizeTableColWidths(v)
-                if (wRes.error) throw new StoreError(wRes.error, 'invalid table colWidths')
-                if (wRes.colWidths) b.colWidths = wRes.colWidths
-                else delete b.colWidths
-                contentTouched = true
-              } else if (k === 'fields') {
-                b.fields = normalizeHeaderFields(v)
-                contentTouched = true
-              } else if (k === 'provenance') {
-                const provRes = validateProvenance(v)
-                if (provRes.error) throw new StoreError(provRes.error, 'invalid provenance')
-                if (provRes.provenance === null) delete b.provenance
-                else if (provRes.provenance !== undefined) b.provenance = provRes.provenance
-                contentTouched = true
-              } else if (['level', 'tone', 'numbered', 'title', 'lineNumbers'].includes(k)) {
-                b[k] = v
-                contentTouched = true
-              }
-            }
-            // Refresh outgoing `dependsOn` `sinceHash` edges when a dependent block's
-            // own content is updated (so updating a stale answer clears its stale flag).
-            if (contentTouched && !('dependsOn' in patchInput) && Array.isArray(b.dependsOn) && b.dependsOn.length > 0) {
-              b.dependsOn = (b.dependsOn as Block['dependsOn']).map((d) => {
-                const originBlk = findBlock(p, d.id)
-                return originBlk ? { id: d.id, sinceHash: originBlk.block.hash, at: now } : d
-              })
-            }
-            if (args.origin === 'human') b.origin = 'human'
-            if (b.body) {
-              const e = validateInline(b.body as Inline[])
-              if (e) throw new StoreError(e, 'inline limit')
-            }
-            changedId = found.block.id
-            const patchedKeys = Object.keys(patchInput).join(',') || 'noop'
-            commitNote = `patch ${found.block.id} (${found.block.type}:${patchedKeys}) on ${touchedSheetId} (${args.origin})`
-            return found.block.id
-          }
-          case 'move': {
-            const id = args.blockId
-            if (!id) throw new StoreError('invalid_op', 'move requires blockId')
-            const from = findBlock(p, id)
-            if (!from) throw new StoreError('not_found', `block ${id} not found`)
-            const fromSid = from.sheet.id
-            const targetSheet = p.sheets[args.toSheetId ?? resolvedSheetId]
-            if (!targetSheet) throw new StoreError('invalid_op', `target sheet not found`)
-            from.sheet.blocks.splice(from.index, 1)
-            let to = targetSheet.blocks.length
-            if (args.toBeforeId) to = targetSheet.blocks.findIndex((b) => b.id === args.toBeforeId)
-            if (args.toAfterId) {
-              const i = targetSheet.blocks.findIndex((b) => b.id === args.toAfterId)
-              to = i >= 0 ? i + 1 : targetSheet.blocks.length
-            }
-            targetSheet.blocks.splice(to < 0 ? targetSheet.blocks.length : to, 0, from.block)
-            touchedSheetId = targetSheet.id
-            changedId = id
-            commitNote =
-              fromSid === targetSheet.id
-                ? `move ${id} within ${targetSheet.id} (${args.origin})`
-                : `move ${id} ${fromSid}→${targetSheet.id} (${args.origin})`
-            return id
-          }
-          case 'remove': {
-            if (!args.blockId) throw new StoreError('invalid_op', 'remove requires blockId')
-            const found = findBlock(p, args.blockId)
-            if (!found) throw new StoreError('not_found', `block ${args.blockId} not found`)
-            found.sheet.blocks.splice(found.index, 1)
-            touchedSheetId = found.sheet.id
-            changedId = found.block.id
-            commitNote = `remove ${found.block.id} (${found.block.type}) from ${touchedSheetId} (${args.origin})`
-            return found.block.id
-          }
-        }
-        return null
-      },
-      { actor: args.origin, note: () => commitNote || `edit (${args.origin})` },
+      (p) => planned.applyTo(p),
+      { actor: args.origin, note: planned.note },
     )
 
     const loaded = store.load(pid)!
-    const render = deps.render
-    const proof = render
+    const touchedSheetId = planned.sheetId
+    const proof = deps.render
       ? await (async () => {
           try {
             const touchedSheet = loaded.sheets[touchedSheetId]
             return toReceipt(
-              await render(touchedSheet, loaded, assetBytesForPacket(deps, loaded)),
+              await deps.render!(touchedSheet, loaded, assetBytesForPacket(deps, loaded)),
               loaded,
               touchedSheet,
             )
@@ -1413,13 +1879,10 @@ export async function galleyEditBlock(deps: GalleyToolsDeps, args: EditBlockArgs
         })()
       : null
 
-    // Direct path (insert / move / remove / patch on an agent-origin block):
-    // always applied, never a proposal.
     let block: BlockOutline | null = null
-    if (changedId) {
-      const found = findBlock(loaded, changedId)
-      if (found) block = blockOutline(found.block)
-    }
+    const found = findBlock(loaded, planned.changedId)
+    if (found) block = blockOutline(found.block)
+
     return {
       ok: true,
       applied: true,
@@ -1500,6 +1963,10 @@ export interface ExportArgs {
   format: 'pdf' | 'docx' | 'typ' | 'tex' | 'md'
   /** When supplied, materializes `<outDir>/galley-exports/<slug>.<ext>` and populates `files[]`. */
   outDir?: string
+  /** Attribution of caller (`'agent'` blocks on error-severity preflight; `'human'` may bypass with `force: true`). */
+  origin?: 'human' | 'agent'
+  /** Human-only override to allow exporting despite `severity: 'error'` preflight diagnostics. */
+  force?: boolean
 }
 
 export function exportSlug(title: string): string {
@@ -1523,7 +1990,16 @@ export function exportSlug(title: string): string {
 export async function galleyExport(
   deps: GalleyToolsDeps,
   args: ExportArgs,
-): Promise<Ok<{ format: string; text?: string; bytes?: Buffer; files?: ExportFileReceipt[] }> | ToolFailure> {
+): Promise<
+  | Ok<{
+      format: string
+      text?: string
+      bytes?: Buffer
+      files?: ExportFileReceipt[]
+      preflightWarnings: GalleyPreflightWarning[]
+    }>
+  | ToolFailure
+> {
   const pid = resolvePacketId(deps, args.packetId)
   if (typeof pid !== 'string') return pid
   const packet = deps.store.load(pid)!
@@ -1547,14 +2023,54 @@ export async function galleyExport(
   try {
     let firstText: string | undefined
     let firstBytes: Buffer | undefined
-    const files: ExportFileReceipt[] = []
     const slug = exportSlug(packet.title)
-    const packetAssetBytes =
-      args.format === 'pdf' || args.format === 'docx' ? assetBytesForPacket(deps, packet) : {}
-    if (args.outDir) {
-      mkdirSync(join(args.outDir, 'galley-exports'), { recursive: true })
+    const needAssets = args.format === 'pdf' || args.format === 'docx' || Boolean(deps.render)
+    const packetAssetBytes = needAssets ? assetBytesForPacket(deps, packet) : {}
+
+    const renderedBySheet = new Map<SheetId, SheetRender>()
+    const proofMap: Record<SheetId, SheetProofReceipt | null> = {}
+
+    if (deps.render) {
+      for (const sid of packet.sheetOrder) {
+        const sh = packet.sheets[sid]
+        if (!sh) continue
+        if (args.format === 'pdf' && targetIds.includes(sid)) {
+          const sr = await deps.render(sh, packet, packetAssetBytes)
+          renderedBySheet.set(sid, sr)
+          proofMap[sid] = toReceipt(sr, packet, sh)
+        } else {
+          try {
+            const sr = await deps.render(sh, packet, packetAssetBytes)
+            renderedBySheet.set(sid, sr)
+            proofMap[sid] = toReceipt(sr, packet, sh)
+          } catch {
+            proofMap[sid] = null
+          }
+        }
+      }
     }
 
+    const preflightCwd = args.outDir ?? deps.cwd ?? process.cwd()
+    const preflightWarnings = (deps.registry ?? defaultGalleyRegistry).runPreflight(
+      packet,
+      deps.render ? proofMap : undefined,
+      preflightCwd,
+    )
+    const blockingErrors = preflightWarnings.filter((w) => w.severity === 'error')
+    if (blockingErrors.length > 0) {
+      const humanForceAllowed = args.origin === 'human' && args.force === true
+      const headlessForceAllowed = args.origin === undefined && args.force === true
+      if (!humanForceAllowed && !headlessForceAllowed) {
+        const blocked = fail(
+          Err.EXPORT_BLOCKED_BY_PREFLIGHT,
+          `export blocked by ${blockingErrors.length} preflight error(s): ${blockingErrors.map((e) => `${e.code}: ${e.message}`).join(' | ')}`,
+        )
+        blocked.preflightWarnings = preflightWarnings
+        return blocked
+      }
+    }
+
+    const prepared: Array<{ sid: SheetId; text?: string; bytes: Buffer; pages: number | null }> = []
     for (let i = 0; i < targetIds.length; i++) {
       const sid = targetIds[i]
       const sheet = packet.sheets[sid]
@@ -1580,7 +2096,7 @@ export async function galleyExport(
           break
         case 'pdf': {
           if (!deps.render) return fail(Err.TYPST_COMPILE_ERROR, 'no render arm available for pdf')
-          const sr = await deps.render(sheet, packet, packetAssetBytes)
+          const sr = renderedBySheet.get(sid) ?? (await deps.render(sheet, packet, packetAssetBytes))
           if (!sr.pdf || sr.pdf.length === 0) return fail(Err.EXPORT_FAILED, 'render arm produced no pdf bytes')
           bytes = sr.pdf
           pages = sr.pages
@@ -1594,19 +2110,24 @@ export async function galleyExport(
         firstText = text
         firstBytes = args.format === 'pdf' || args.format === 'docx' ? bytes : undefined
       }
+      prepared.push({ sid, text, bytes, pages })
+    }
 
-      if (args.outDir) {
-        const omitSheetSuffix = packet.sheetOrder.length === 1
-        const filename = omitSheetSuffix ? `${slug}.${args.format}` : `${slug}-${sid}.${args.format}`
+    const files: ExportFileReceipt[] = []
+    if (args.outDir) {
+      mkdirSync(join(args.outDir, 'galley-exports'), { recursive: true })
+      const omitSheetSuffix = packet.sheetOrder.length === 1
+      for (const item of prepared) {
+        const filename = omitSheetSuffix ? `${slug}.${args.format}` : `${slug}-${item.sid}.${args.format}`
         const relPath = `galley-exports/${filename}`
-        writeFileSync(join(args.outDir, relPath), bytes)
+        writeFileSync(join(args.outDir, relPath), item.bytes)
         files.push({
-          sheetId: sid,
+          sheetId: item.sid,
           path: relPath,
           format: args.format,
-          pages,
-          sizeBytes: bytes.length,
-          sha256: createHash('sha256').update(bytes).digest('hex'),
+          pages: item.pages,
+          sizeBytes: item.bytes.length,
+          sha256: createHash('sha256').update(item.bytes).digest('hex'),
         })
       }
     }
@@ -1617,6 +2138,7 @@ export async function galleyExport(
       ...(firstText !== undefined ? { text: firstText } : {}),
       ...(firstBytes !== undefined ? { bytes: firstBytes } : {}),
       ...(args.outDir ? { files } : {}),
+      preflightWarnings,
     }
   } catch (e) {
     return mapError(e)

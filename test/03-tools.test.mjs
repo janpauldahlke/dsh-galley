@@ -149,11 +149,14 @@ test('galley_edit_block: insert before a block (compact receipt)', async () => {
 })
 
 test('galley_edit_block: move + remove (compact receipt)', async () => {
-  const r = await openPacket([
-    { type: 'prose', body: 'a' },
-    { type: 'prose', body: 'b' },
-    { type: 'prose', body: 'c' },
-  ])
+  const r = await openPacket(
+    [
+      { type: 'prose', body: 'a' },
+      { type: 'prose', body: 'b' },
+      { type: 'prose', body: 'c' },
+    ],
+    { origin: 'agent' },
+  )
   const mv = await galleyEditBlock(deps, {
     packetId: r.packetId, sheetId: 's1', op: 'move', origin: 'agent',
     blockId: 'b3', baseHash: (await blockAt(r.packetId, 2)).hash, toBeforeId: 'b1',
@@ -313,10 +316,13 @@ test('proposal rule: 4/4 quadrants (agent/human block × patch/direct-op)', asyn
   assert.equal((await blocksOf(q3.packetId)).length, 0)
 
   // Q4 — a NON-patch op on an AGENT block (move) → direct apply (applied:true).
-  const q4 = await openPacket([
-    { type: 'prose', body: 'a' },
-    { type: 'prose', body: 'b' },
-  ])
+  const q4 = await openPacket(
+    [
+      { type: 'prose', body: 'a' },
+      { type: 'prose', body: 'b' },
+    ],
+    { origin: 'agent' },
+  )
   const r4 = await galleyEditBlock(deps, {
     packetId: q4.packetId, sheetId: 's1', op: 'move', origin: 'agent',
     blockId: 'b2', baseHash: (await blockAt(q4.packetId, 1)).hash, toBeforeId: 'b1',

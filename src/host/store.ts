@@ -716,18 +716,14 @@ export class GalleyStore {
     const prevSnapshot = JSON.parse(JSON.stringify(packet)) as GalleyPacket
     const touchedId = apply(packet)
 
-    // Cycle guard (spec 01 §4 / 02 §3 GALLEY_DEPENDENCY_CYCLE): the touched
-    // block's (possibly new) outgoing edges must not close a dependency loop.
-    // Only the touched block's edges changed, so a new cycle must include it.
-    if (touchedId) {
-      const touched = findBlock(packet, touchedId)
-      if (touched) {
-        const byId = new Map<BlockId, Block>()
-        for (const sid of packet.sheetOrder) for (const b of packet.sheets[sid].blocks) byId.set(b.id, b)
-        for (const dep of touched.block.dependsOn ?? []) {
-          if (createsCycle(touchedId, dep.id, byId)) {
-            throw new StoreError('cycle', `block ${touchedId} creates a dependency cycle`)
-          }
+    // Cycle guard (spec 01 §4 / 02 §3 GALLEY_DEPENDENCY_CYCLE): no block's
+    // outgoing edges may close a dependency loop (covers single and batch commits).
+    const byId = new Map<BlockId, Block>()
+    for (const sid of packet.sheetOrder) for (const b of packet.sheets[sid].blocks) byId.set(b.id, b)
+    for (const [bid, blk] of byId) {
+      for (const dep of blk.dependsOn ?? []) {
+        if (createsCycle(bid, dep.id, byId)) {
+          throw new StoreError('cycle', `block ${bid} creates a dependency cycle`)
         }
       }
     }
@@ -843,12 +839,14 @@ export class GalleyStore {
 
   // ── proposals + annotations (bump packet.rev so rev-polling observes deltas) ──
 
-  addProposal(id: string, proposal: GalleyProposal): GalleyProposal {
+  addProposal(id: string, proposal: GalleyProposal, opts?: { bumpRev?: boolean }): GalleyProposal {
     const packet = this.load(id)
     if (!packet) throw new StoreError('not_found', `packet ${id} not found`)
     const next = [...this.readJson<GalleyProposal[]>(join(this.dir(id), 'proposals.json'), []), proposal]
     this.atomicWrite(join(this.dir(id), 'proposals.json'), JSON.stringify(next))
-    this.bumpRev(id, `proposal ${proposal.id} (${proposal.op ?? 'patch'} ${proposal.targetBlockId})`, 'agent')
+    if (opts?.bumpRev !== false) {
+      this.bumpRev(id, `proposal ${proposal.id} (${proposal.op ?? 'patch'} ${proposal.targetBlockId})`, 'agent')
+    }
     return proposal
   }
   listProposals(id: string): GalleyProposal[] {

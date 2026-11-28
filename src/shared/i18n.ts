@@ -37,6 +37,8 @@ export interface GalleyPreflightStrings {
   pageOverflow: (sheetTitle: string, target: number | string, overflow: number) => string
   sourceLineWrap: (blockId: string, lineNum: number, charLen: number) => string
   unknownHeaderFields: (blockId: string, keys: string[]) => string
+  emptyHeaderTitle: (blockId: string) => string
+  preflightInternal: (checkId: string, errorMessage: string) => string
 }
 
 export interface GalleyUiStrings {
@@ -86,6 +88,8 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
         `Source text ${id}: line ${line} (${len} chars) may soft-wrap and shift marginal line numbers`,
       unknownHeaderFields: (id, keys) =>
         `Header ${id} ignored unsupported field(s): ${keys.join(', ')} (supported: title, subtitle, subject/fach, meta/klasse, date/datum, name)`,
+      emptyHeaderTitle: (id) => `Header ${id} has an empty title (set fields.title)`,
+      preflightInternal: (checkId, err) => `Preflight check "${checkId}" failed internally: ${err}`,
     },
     ui: {
       packet: 'Packet',
@@ -129,6 +133,8 @@ export const GALLEY_I18N: Record<GalleyLocale, GalleyLocaleBundle> = {
         `Quellentext ${id}: Zeile ${line} (${len} Zeichen) bricht ggf. um und verschiebt nachfolgende Randzeilennummern`,
       unknownHeaderFields: (id, keys) =>
         `Kopfbereich ${id} ignoriert unbekannte Felder: ${keys.join(', ')} (unterstützt: title/titel, subtitle/untertitel, subject/fach, meta/klasse, date/datum, name)`,
+      emptyHeaderTitle: (id) => `Kopfbereich ${id} hat keinen Titel (fields.title / fields.titel setzen)`,
+      preflightInternal: (checkId, err) => `Vorabprüfung "${checkId}" intern fehlgeschlagen: ${err}`,
     },
     ui: {
       packet: 'Mappe',

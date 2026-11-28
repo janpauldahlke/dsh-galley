@@ -48,6 +48,8 @@ import {
   getSessionActivePacket,
 } from './workspace.ts'
 import {
+  Err,
+  MAX_BATCH_OPS,
   galleyOpen,
   galleyStatus,
   galleyReadBlock,
@@ -69,6 +71,7 @@ export {
   PLUGIN,
   VERSION,
   MAX_INJECT_CHARS,
+  MAX_BATCH_OPS,
   defaultGalleyRegistry,
   GalleyServiceRegistry,
   installGalleyInject,
@@ -239,6 +242,7 @@ async function getToolContext(args: Record<string, unknown>, exec?: ExecLike): P
   root: string
   sessionId: string | null
   effectivePacketId: string | undefined
+  unpinnedSession: boolean
 }> {
   const explicitCwd = typeof args.cwd === 'string' ? args.cwd : undefined
   const sessionCwd = exec?.agent?.session?.header?.cwd
@@ -247,13 +251,26 @@ async function getToolContext(args: Record<string, unknown>, exec?: ExecLike): P
   const sessionId = sessionIdOf(exec)
 
   let effectivePacketId = typeof args.packetId === 'string' ? args.packetId : undefined
+  let unpinnedSession = false
   if (effectivePacketId === undefined && sessionId) {
+    // When `sessionId` is present, never fall back to workspace-global `store.getActivePacket()`:
+    // an unbound session must return `GALLEY_NO_ACTIVE_PACKET` until `galley_open` binds it.
     const pinned = getSessionActivePacket(root, sessionId)
     if (pinned && deps.store.load(pinned)) {
       effectivePacketId = pinned
+    } else {
+      unpinnedSession = true
     }
   }
-  return { deps, root, sessionId, effectivePacketId }
+  return { deps, root, sessionId, effectivePacketId, unpinnedSession }
+}
+
+function unpinnedSessionFailure() {
+  return {
+    ok: false as const,
+    code: Err.NO_ACTIVE_PACKET,
+    message: 'no active packet bound to this session (call galley_open first)',
+  }
 }
 
 /** Register the six M1 tools (tools face). */
@@ -358,7 +375,8 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const { deps, effectivePacketId, unpinnedSession } = await getToolContext(args, exec)
+        if (unpinnedSession) return unpinnedSessionFailure()
         const a = effectivePacketId !== undefined ? { ...args, packetId: effectivePacketId } : args
         return await galleyStatus(deps, a as unknown as Parameters<typeof galleyStatus>[1])
       } catch (error) {
@@ -385,7 +403,8 @@ export function registerGalleyTools(ctx: Context): () => void {
     output: out({ ok: { type: 'boolean' }, packetId: { type: 'string' }, blocks: { type: 'array', items: { type: 'object', additionalProperties: true } } }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const { deps, effectivePacketId, unpinnedSession } = await getToolContext(args, exec)
+        if (unpinnedSession) return unpinnedSessionFailure()
         const a = effectivePacketId !== undefined ? { ...args, packetId: effectivePacketId } : args
         return await galleyReadBlock(deps, a as unknown as Parameters<typeof galleyReadBlock>[1])
       } catch (error) {
@@ -398,12 +417,13 @@ export function registerGalleyTools(ctx: Context): () => void {
     name: 'galley_edit_block',
     description:
       'The single writer for blocks AND sheets (never edit `.dsh/galley/*` files directly). ' +
-      'Block ops: `insert` | `patch` | `move` | `remove`. Sheet ops: `sheet-add` | `sheet-update` | `sheet-remove`. ' +
+      `Block ops: \`insert\` | \`patch\` | \`move\` | \`remove\` | \`batch\` (prefer \`op: "batch"\` with \`ops\` up to ${MAX_BATCH_OPS} items to apply multi-block edits in one atomic revision). ` +
+      'Sheet ops: `sheet-add` | `sheet-update` | `sheet-remove`. ' +
       'Conventions: (1) On multi-sheet packets, `insert` REQUIRES `sheetId` (or `beforeId`/`afterId`); omitting `beforeId`/`afterId` appends to the end of `sheetId`. ' +
       '(2) `task` auto-prepends "Task N" (or "Aufgabe N" when packet locale is "de") unless `body` already starts with a numbered prefix. ' +
       '(3) `dependsOn: ["b2"]` accepts block ID strings on both `insert` and `patch` (auto-snapshots `sinceHash`). ' +
       '(4) `table` accepts 2D strings with mini-markup (`headers: ["Col A","Col B"]`, `rows: [["1", "**Bold**"]]`) + optional `colWidths` (`["20%","80%"]`). ' +
-      '(5) `header.fields`: accepts `{ title, subtitle, subject, meta, date, name }` (or `{ titel, untertitel, fach, klasse, datum, name }`); pass `name: ""` for a blank fill-in line, or omit `name` when not needed.',
+      '(5) `header.fields`: accepts `{ title, subtitle, subject, meta, date, name }` (or `{ titel, untertitel, fach, klasse, datum, name }`); `fields.title` is required on `header` insert (`name: ""` renders a blank fill-in line; omit `name` when not needed).',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -417,7 +437,15 @@ export function registerGalleyTools(ctx: Context): () => void {
         },
         op: {
           type: 'string',
-          enum: ['insert', 'patch', 'move', 'remove', 'sheet-add', 'sheet-update', 'sheet-remove'],
+          enum: ['insert', 'patch', 'move', 'remove', 'batch', 'sheet-add', 'sheet-update', 'sheet-remove'],
+        },
+        ops: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_BATCH_OPS,
+          description:
+            `batch: 1..${MAX_BATCH_OPS} block operations (\`{ op: "insert" | "patch" | "move" | "remove", sheetId?, block?, blockId?, patch?, beforeId?, afterId?, toSheetId?, toBeforeId?, toAfterId?, baseHash? }\`) applied in one atomic commit.`,
+          items: { type: 'object', additionalProperties: true },
         },
         beforeId: { type: 'string', description: 'insert: place before this block ID (omit `beforeId`/`afterId` to append to sheet end).' },
         afterId: { type: 'string', description: 'insert: place immediately after this block ID.' },
@@ -465,7 +493,8 @@ export function registerGalleyTools(ctx: Context): () => void {
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const { deps, effectivePacketId, unpinnedSession } = await getToolContext(args, exec)
+        if (unpinnedSession) return unpinnedSessionFailure()
         const a = {
           ...(args as Record<string, unknown>),
           ...(effectivePacketId !== undefined ? { packetId: effectivePacketId } : {}),
@@ -510,7 +539,8 @@ export function registerGalleyTools(ctx: Context): () => void {
     output: out({ ok: { type: 'boolean' }, annotations: { type: 'array', items: { type: 'object', additionalProperties: true } } }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const { deps, effectivePacketId, unpinnedSession } = await getToolContext(args, exec)
+        if (unpinnedSession) return unpinnedSessionFailure()
         const a = {
           ...args,
           ...(effectivePacketId !== undefined ? { packetId: effectivePacketId } : {}),
@@ -527,7 +557,9 @@ export function registerGalleyTools(ctx: Context): () => void {
     name: 'galley_export',
     description:
       'Export sheets to pdf (via Typst arm), docx (deterministic OOXML Word document), or typ / md / tex (pure text), ' +
-      'writing deliverables into <cwd>/galley-exports/ ready for `present`. Omit packetId to use the active packet.',
+      'writing deliverables into <cwd>/galley-exports/ ready for `present`. ' +
+      'The live Galley pane already previews every committed revision automatically; call `galley_export` ONLY when the user asks for final deliverable files (.pdf/.docx), not after every edit. ' +
+      'Omit packetId to use the active packet.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -544,14 +576,18 @@ export function registerGalleyTools(ctx: Context): () => void {
       ok: { type: 'boolean' },
       format: { type: 'string' },
       files: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      preflightWarnings: { type: 'array', items: { type: 'object', additionalProperties: true } },
     }),
     async execute(args: Record<string, unknown>, exec?: ExecLike) {
       try {
-        const { deps, effectivePacketId } = await getToolContext(args, exec)
+        const { deps, effectivePacketId, unpinnedSession } = await getToolContext(args, exec)
+        if (unpinnedSession) return unpinnedSessionFailure()
         const exportArgs = {
           ...(args as unknown as Parameters<typeof galleyExport>[1]),
           ...(effectivePacketId !== undefined ? { packetId: effectivePacketId } : {}),
           outDir: deps.cwd,
+          origin: 'agent' as const,
+          force: false,
         }
         const res = await galleyExport(deps, exportArgs)
         if (res.ok && 'bytes' in res) {

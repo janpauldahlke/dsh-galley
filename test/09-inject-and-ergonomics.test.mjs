@@ -164,16 +164,17 @@ test('KV-cache law: 0 messages when unchanged; whole-Mappe delta + attributed sh
       assert.equal(out, decisionIn)
     }
 
-    // 2. Open Problem Sheet + Answer Key (`worksheet`) and link b4 -> b2
-    const { deps, store } = (() => {
+    // 2. Open Problem Sheet + Answer Key (`worksheet`), bind `sess-kv`, and link b4 -> b2
+    const { deps, store, root } = (() => {
       const m = makeDeps(subWs, registry)
-      return { deps: m.deps, store: m.deps.store }
+      return { deps: m.deps, store: m.deps.store, root: m.root }
     })()
     const opened = await galleyOpen(deps, {
       template: 'worksheet',
       title: 'Distributed Consensus',
     })
     const pid = opened.packetId
+    setSessionActivePacket(root, 'sess-kv', pid)
     const linked = await galleyEditBlock(deps, {
       packetId: pid,
       op: 'patch',

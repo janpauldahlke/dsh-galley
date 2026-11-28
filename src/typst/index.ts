@@ -322,7 +322,7 @@ export function blockTypst(
       }
       if (f.datum) meta.push(`#text(size: 9pt, fill: luma(110), ${typString(f.datum)})`)
       const right = `[${meta.length ? meta.join('#linebreak()') : ''}]`
-      const left: string[] = [`#text(size: 8pt, fill: luma(110), ${typString(pStr.headerEyebrow)})`]
+      const left: string[] = []
       if (f.titel) left.push(`#text(size: 17pt, weight: "bold", ${typString(f.titel)})`)
       if (f.subtitle) left.push(`#text(size: 10.5pt, fill: luma(85), ${typString(f.subtitle)})`)
       if (f.name !== undefined) {
@@ -331,7 +331,7 @@ export function blockTypst(
       }
       lines.push(
         `#grid(columns: (1fr, auto), column-gutter: 12pt, align: (top, top))` +
-          `[${left.join('#linebreak()')}#linebreak()]${right}`,
+          `[${left.length ? `${left.join('#linebreak()')}#linebreak()` : ''}]${right}`,
         `#rect(width: 100%, height: 0.6pt, fill: luma(170))`,
       )
       break

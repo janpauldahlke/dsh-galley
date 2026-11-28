@@ -327,15 +327,16 @@ test('Seam 2 & 3: Two-session concurrency in one cwd + durable sessions.json acr
     assert.equal(st1Restart.packetId, p1)
     assert.equal(st2Restart.packetId, p2)
 
-    // 5. Deleting P2 prunes S2's binding from `sessions.json` so S2 falls back cleanly to P1 (`active.json`)
+    // 5. Deleting P2 prunes S2's binding from `sessions.json`; S2 never leaks P1 as active, while listing P1 in workspace packets
     const delP2 = await post('/api/galley/edit', { cwd, sessionId: 'S2', op: 'packet-delete' })
     assert.equal(delP2.status, 200)
     assert.equal(delP2.json.deletedId, p2)
     assert.equal(cordisGalley.getSessionPacketId(cwd, 'S2'), null)
 
-    const st2Fallback = await (await fetch(withCwdQuery(`${baseUrl}/api/galley/state`, cwd, 'S2'))).json()
-    assert.equal(st2Fallback.activePacket, true)
-    assert.equal(st2Fallback.packetId, p1, 'after deleting P2, S2 must fall back cleanly to P1')
+    const st2Unbound = await (await fetch(withCwdQuery(`${baseUrl}/api/galley/state`, cwd, 'S2'))).json()
+    assert.equal(st2Unbound.activePacket, false, 'after deleting P2, S2 must show empty state rather than hijacking S1 packet P1')
+    assert.equal(st2Unbound.packetId, null)
+    assert.ok(st2Unbound.packets.some((p) => p.id === p1), 'existing workspace packet P1 remains selectable in picker')
   } finally {
     await new Promise((resolve) => srv.close(resolve))
   }

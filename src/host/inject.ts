@@ -469,11 +469,22 @@ export function installGalleyInject(ctx: Context, injectDeps: GalleyInjectDeps =
 
         const { store, root, cwd: resolvedCwd, deps } = await resolveForCwd(cwd)
         const sessionId = sessionIdOf(session)
-        const pinnedId = sessionId ? getSessionActivePacket(root, sessionId) : null
-        const activeId = pinnedId && store.load(pinnedId) ? pinnedId : store.getActivePacket()
+        let activeId: string | null
+        if (sessionId) {
+          // Never fall back to workspace-global `store.getActivePacket()` when
+          // `sessionId` is present — prevents injecting another chat's packet into
+          // Turn 1 of a brand-new session. Resumed sessions with prior galley-delta
+          // history (`state.lastPacketId`) recover their own packet cleanly.
+          const pinnedId = getSessionActivePacket(root, sessionId)
+          const resumedId =
+            !pinnedId && state.lastPacketId && store.load(state.lastPacketId) ? state.lastPacketId : null
+          activeId = pinnedId && store.load(pinnedId) ? pinnedId : resumedId
+        } else {
+          activeId = store.getActivePacket()
+        }
         if (!activeId) {
-          // Workspace has no active Mappe yet — splice 0 messages, keep session healthy
-          // so opening a Mappe on a later turn will inject cleanly.
+          // Session has no bound packet yet — splice 0 messages, keep session healthy
+          // so opening a packet on a later turn will inject cleanly.
           return decision
         }
 
